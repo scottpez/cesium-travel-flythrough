@@ -1312,10 +1312,19 @@ function preloadPhotoMemories() {
     if (qs.has("debug")) document.body.classList.add("debug");
     if (qs.has("cinematic")) document.body.classList.add("cinematic");
     if (qs.has("presentation")) document.body.classList.add("presentation");
+    if (qs.has("hidecontrols")) document.getElementById("controls").style.display = "none";
     if (qs.has("record")) setSpeedDialValue(RECORD_SPEED_DIAL_VALUE);
-    if (qs.has("warmup")) warmUpTiles();
     if (qs.has("fast")) playbackMultiplier = parseFloat(qs.get("fast")) || playbackMultiplier;
-    if (qs.has("autostart")) startJourney();
+
+    const shouldWarmUp = qs.has("warmup");
+    const shouldAutostart = qs.has("autostart");
+
+    if (shouldWarmUp) {
+      await warmUpTiles();
+    }
+    if (shouldAutostart) {
+      startJourney();
+    }
   } catch (err) {
     showFatalError(`boot() threw — nothing will render.\n${err.stack || err}`);
   }
