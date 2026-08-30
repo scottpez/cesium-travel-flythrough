@@ -9,7 +9,9 @@
 // ============================================================================
 
 export const ION_ACCESS_TOKEN =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI0OGM1YzIyNS1hODZhLTQwMTYtYmE4Ny0zY2VhMzNlZjU1OGYiLCJpZCI6MjM2OTQ3LCJzdWIiOiJzY29wZXoiLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoic2NvdHRwZXotdHJhdmVsLWFwcCIsImlhdCI6MTc4NjQwNjExMn0.3OBQXP2i3OasfNTvrBEwABKDStMVyUja70Nxc2fOFrA";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6InNUMktxcGhrMTlLdWhWTi0iLCJqdGkiOiI0OGM1YzIyNS1hODZhLTQwMTYtYmE4Ny0zY2VhMzNlZjU1OGYiLCJpZCI6MjM2OTQ3LCJzdWIiOiJzY29wZXoiLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoic2NvdHRwZXotdHJhdmVsLWFwcCIsImlhdCI6MTc4ODA2MzA0Mn0.AqMVhp1sosub036XRT9YY9nkiRjrGakV79tHrUImYjc";
+
+  
 
 // Google Photorealistic 3D Tiles: real photogrammetry (actual textured
 // building facades, trees, terrain) instead of Cesium OSM Buildings' plain
