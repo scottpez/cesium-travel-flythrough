@@ -57,7 +57,7 @@ Promise.all(
 )
   .then(() => {
     // Minify CSS files
-    const cssFiles = findFiles(__dirname, ".css", ["node_modules", ".git", "cesiumjs"]);
+    const cssFiles = findFiles(__dirname, ".css", ["node_modules", ".git", "cesiumjs", "docs"]);
     cssFiles.forEach((file) => {
       const src = file;
       const dest = path.join(docsDir, path.relative(__dirname, file));
@@ -69,7 +69,7 @@ Promise.all(
     });
 
     // Minify JSON files (GeoJSON, etc.)
-    const jsonFiles = findFiles(__dirname, ".json", ["node_modules", ".git", "cesiumjs"]);
+    const jsonFiles = findFiles(__dirname, ".json", ["node_modules", ".git", "cesiumjs", "docs"]);
     jsonFiles.forEach((file) => {
       const src = file;
       const dest = path.join(docsDir, path.relative(__dirname, file));
