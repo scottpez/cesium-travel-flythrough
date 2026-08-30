@@ -4,11 +4,11 @@ const fs = require("fs");
 const path = require("path");
 const esbuild = require("esbuild");
 
-const distDir = path.join(__dirname, "dist");
+const docsDir = path.join(__dirname, "docs");
 
-// Ensure dist directory exists
-if (!fs.existsSync(distDir)) {
-  fs.mkdirSync(distDir, { recursive: true });
+// Ensure docs directory exists
+if (!fs.existsSync(docsDir)) {
+  fs.mkdirSync(docsDir, { recursive: true });
 }
 
 // List of JS files to minify
@@ -38,7 +38,7 @@ function minifyJSON(content) {
 Promise.all(
   jsFiles.map((file) => {
     const src = path.join(__dirname, file);
-    const dest = path.join(distDir, file);
+    const dest = path.join(docsDir, file);
 
     return esbuild
       .build({
@@ -60,7 +60,7 @@ Promise.all(
     const cssFiles = findFiles(__dirname, ".css", ["node_modules", ".git", "cesiumjs"]);
     cssFiles.forEach((file) => {
       const src = file;
-      const dest = path.join(distDir, path.relative(__dirname, file));
+      const dest = path.join(docsDir, path.relative(__dirname, file));
       const content = fs.readFileSync(src, "utf8");
       const minified = minifyCSS(content);
       ensureDirExists(path.dirname(dest));
@@ -72,7 +72,7 @@ Promise.all(
     const jsonFiles = findFiles(__dirname, ".json", ["node_modules", ".git", "cesiumjs"]);
     jsonFiles.forEach((file) => {
       const src = file;
-      const dest = path.join(distDir, path.relative(__dirname, file));
+      const dest = path.join(docsDir, path.relative(__dirname, file));
       // Skip package.json and package-lock.json
       if (file.endsWith("package.json") || file.endsWith("package-lock.json")) {
         return;
@@ -90,13 +90,14 @@ Promise.all(
 
     files.forEach((file) => {
       const srcPath = path.join(srcDir, file);
-      const destPath = path.join(distDir, file);
+      const destPath = path.join(docsDir, file);
 
-      // Skip node_modules, .git, package files, already-processed files, and dist itself
+      // Skip node_modules, .git, package files, already-processed files, and docs itself
       if (
         file === "node_modules" ||
         file === ".git" ||
         file === "dist" ||
+        file === "docs" ||
         file === "package.json" ||
         file === "package-lock.json" ||
         file === "build.js" ||
@@ -118,7 +119,7 @@ Promise.all(
       }
     });
 
-    console.log("\n✓ Build complete. dist/ is ready for deployment.");
+    console.log("\n✓ Build complete. docs/ is ready for deployment.");
   })
   .catch((err) => {
     console.error("Build failed:", err);
