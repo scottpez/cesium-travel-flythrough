@@ -100,18 +100,22 @@ const mainViewer = new Cesium.Viewer("cesiumMain", {
   fullscreenButton: false,
 });
 mainViewer.clock.shouldAnimate = false;
-// Slightly relaxed detail + a bigger tile cache: this app moves across huge
-// distances quickly (whole continents in seconds during time-warped flight
-// legs), so favoring fast-arriving tiles over maximum sharpness avoids the
-// "gray/missing ground" look of tiles that never caught up to the camera.
-mainViewer.scene.globe.maximumScreenSpaceError = 2.2;
-mainViewer.scene.globe.tileCacheSize = 3000;
+// Aggressive detail + massive tile cache: with your 47GB GPU, we can afford
+// higher LOD (lower screenSpaceError) and keep way more tiles in VRAM.
+// This ensures photorealistic tiles are crisp throughout, even during record-speed playback.
+mainViewer.scene.globe.maximumScreenSpaceError = 1.0;
+mainViewer.scene.globe.tileCacheSize = 15000;
 mainViewer.scene.globe.enableLighting = true;
 mainViewer.scene.skyAtmosphere.show = true;
 mainViewer.scene.fog.enabled = true;
+mainViewer.scene.fog.density = 0.0002; // Reduce fog for better tile visibility
 mainViewer.scene.globe.depthTestAgainstTerrain = true;
 mainViewer.scene.screenSpaceCameraController.enableCollisionDetection = true;
-mainViewer.scene.postProcessStages.fxaa.enabled = true;
+// Post-processing: TAA for smoother rendering + brightness boost
+mainViewer.scene.postProcessStages.fxaa.enabled = false;
+if (Cesium.PostProcessStageLibrary.createTemporalAntiAliasingStage) {
+  mainViewer.scene.postProcessStages.add(Cesium.PostProcessStageLibrary.createTemporalAntiAliasingStage());
+}
 
 const miniViewer = new Cesium.Viewer("cesiumMini", {
   useDefaultRenderLoop: false,
@@ -520,6 +524,9 @@ function overlayDurationScale() {
 let lastFrameMs = null;
 let lastLegId = null;
 let lastStateName = null;
+// Lookahead tile prefetch: keeps tiles loaded for the next ~10 minutes of playback
+let prefetchAheadSeconds = 600; // 10 minutes ahead
+let lastPrefetchTime = -999;
 let chapterTimer = null;
 // Suppresses the leg-transition block's automatic chapter-card display for
 // one upcoming transition — set right before (re)starting the journey so the
@@ -1023,6 +1030,30 @@ function render() {
   mainViewer.render();
   miniViewer.render();
 
+  // -- Lookahead tile prefetch --
+  // Every 30 seconds, peek 10 minutes ahead and render to load those tiles without pausing playback
+  if (playing && hasStartedOnce && simSeconds - lastPrefetchTime > 30) {
+    lastPrefetchTime = simSeconds;
+    const prefetchSim = Math.min(simSeconds + prefetchAheadSeconds, TOTAL_SIM);
+    const prefetchState = interpolateRoute(prefetchSim);
+    if (prefetchState) {
+      const prefetchCam = mainViewer.camera;
+      const savedPos = prefetchCam.position.clone();
+      const savedDir = prefetchCam.direction.clone();
+      const savedUp = prefetchCam.up.clone();
+      // Quickly pan to lookahead position and render
+      prefetchCam.setView({
+        destination: prefetchState.pos,
+        orientation: { heading: R.toRadians(prefetchState.heading), pitch: R.toRadians(prefetchState.pitch), roll: 0 },
+      });
+      mainViewer.render();
+      // Restore camera immediately
+      prefetchCam.position = savedPos;
+      prefetchCam.direction = savedDir;
+      prefetchCam.up = savedUp;
+    }
+  }
+
   // -- HUD --
   const distSoFarM = LEGS.filter((l) => l.simEnd <= simSeconds).reduce((s, l) => s + (l._totalDist || 0), 0)
     + (leg._totalDist || 0) * state.frac;
@@ -1171,9 +1202,13 @@ async function warmUpTiles() {
       destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.isFlight ? 6000 : 900),
       orientation: { heading: 0, pitch: R.toRadians(-90), roll: 0 },
     });
-    mainViewer.render();
+    // Aggressive warmup: render 3 frames per waypoint with 20ms spacing
+    // This gives tiles much more time to load while keeping warmup reasonably fast
+    for (let f = 0; f < 3; f++) {
+      mainViewer.render();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     el.btnWarmup.textContent = `🔥 ${Math.round(((i + 1) / points.length) * 100)}%`;
-    await new Promise((resolve) => setTimeout(resolve, 90));
   }
 
   el.btnWarmup.textContent = "✓ Warmed Up";
