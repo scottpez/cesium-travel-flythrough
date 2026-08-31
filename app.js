@@ -218,7 +218,7 @@ miniViewer.scene.screenSpaceCameraController.enableInputs = false;
 // absolute brightness value can't serve all of them. Scaling their baselines
 // keeps their relative look intact while letting one number lift the lot.
 // 1.0 = each candidate's own baseline. Raise to lighten.
-const MINIMAP_BRIGHTNESS = 1.8;
+const MINIMAP_BRIGHTNESS = 2.5;
 
 const MINIMAP_BASEMAPS = [
   {
