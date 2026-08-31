@@ -9,9 +9,9 @@
 // ============================================================================
 
 export const ION_ACCESS_TOKEN =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6Im4wYXdvcF9SdlA0b0N4OHYiLCJqdGkiOiJhNTM5OWJhYy1hNjY4LTRjMGEtYWU1NS0wZTAxNmMyNGQ4OWIiLCJpZCI6MjM2OTQ3LCJzdWIiOiJzY29wZXoiLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoic2NvdHRwZXotdHJhdmVsLWFwcCIsImlhdCI6MTc4ODA2MzE4N30.ZzrhwwR6wOznxOsi2TfJBIjJpd_INCBO7YTliKVFPVI";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6IlptdzYxWExCX29pazRyejkiLCJqdGkiOiJhNTM5OWJhYy1hNjY4LTRjMGEtYWU1NS0wZTAxNmMyNGQ4OWIiLCJpZCI6MjM2OTQ3LCJzdWIiOiJzY29wZXoiLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoic2NvdHRwZXotdHJhdmVsLWFwcCIsImlhdCI6MTc4ODE5NjAzNH0.LKaVwzde7QKfugS0O3DQN3ET6dGLjbkFSJtuQbqh9EA";
 
-  
+export const GOOGLE_MAPS_API_KEY = "AIzaSyD5RYAIHh7WaIZWHSvXV4tU77LVcoab7aU";
 
 // Google Photorealistic 3D Tiles: real photogrammetry (actual textured
 // building facades, trees, terrain) instead of Cesium OSM Buildings' plain

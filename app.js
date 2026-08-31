@@ -5,12 +5,14 @@
 // (cinematic main view + seatback-style minimap), and updates the HUD/DOM.
 // ============================================================================
 
-import { ION_ACCESS_TOKEN, USE_PHOTOREALISTIC_TILES } from "./config.js";
+import { ION_ACCESS_TOKEN, GOOGLE_MAPS_API_KEY, USE_PHOTOREALISTIC_TILES } from "./config.js";
+
 import { LEGS, FLAGS, BRAND_BADGES, CREDITS } from "./itinerary.js";
 import { VEHICLE_DEFS, applyVehicleStyle } from "./vehicles.js";
 import { applyFlagSwatch } from "./flags.js";
 
 Cesium.Ion.defaultAccessToken = ION_ACCESS_TOKEN;
+Cesium.GoogleMaps.defaultApiKey = GOOGLE_MAPS_API_KEY; // This tells Cesium how to authenticate Google requests correctly
 
 // ---- On-screen error banner ------------------------------------------------
 // Registered before anything else runs so it catches viewer-construction
@@ -159,22 +161,22 @@ async function setupMinimapImagery() {
   miniViewer.imageryLayers.removeAll();
   let layer = null;
   try {
-    const provider = await Cesium.createWorldImageryAsync();
+    // Use the built-in, bundled Natural Earth II low-res global map.
+    // This provides a clean continent/landmass basemap without network bloat or memory leaks.
+    const provider = await Cesium.TileMapServiceImageryProvider.fromUrl(
+      Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII")
+    );
     layer = miniViewer.imageryLayers.addImageryProvider(provider);
   } catch (e) {
-    console.warn("Ion World Imagery unavailable for minimap, falling back to OpenStreetMap.", e);
-    try {
-      const provider = new Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" });
-      layer = miniViewer.imageryLayers.addImageryProvider(provider);
-    } catch (e2) {
-      console.warn("Minimap basemap imagery unavailable, minimap will stay a flat dark void.", e2);
-      return;
-    }
+    console.warn("Natural Earth II fallback failed.", e);
+    return;
   }
-  layer.brightness = 0.55;
-  layer.saturation = 0.55;
-  layer.contrast = 1.15;
-  window.__miniLayer = layer; // debug visibility
+
+  // Style it dark and stylized to match your seatback aesthetic
+  layer.brightness = 0.45;
+  layer.contrast = 1.2;
+  layer.saturation = 0.3; // Desaturate it so the bright yellow route line pops
+  window.__miniLayer = layer;
 }
 
 async function setupTerrainAndBuildings() {
@@ -184,7 +186,14 @@ async function setupTerrainAndBuildings() {
       // createGooglePhotorealistic3DTileset (no "Async" suffix), unlike most
       // other Cesium docs/examples floating around. Wrapping in Promise.resolve
       // handles it whether or not it returns a promise.
-      const tileset = await Promise.resolve(Cesium.createGooglePhotorealistic3DTileset());
+      const tileset = await Promise.resolve(Cesium.createGooglePhotorealistic3DTileset({
+        maximumMemoryUsage: 2048, // 2GB limit
+        maximumCachedBytes: 1073741824, // Hard cap cache at 1GB
+        cullRequestsWhileMoving: true,
+        skipLevelOfDetail: true,
+        immediatelyLoadDesiredLevelOfDetail: true,
+        loadSiblings: false
+      }));
       mainViewer.scene.primitives.add(tileset);
       return;
     } catch (e) {
@@ -196,13 +205,6 @@ async function setupTerrainAndBuildings() {
     mainViewer.terrainProvider = await Cesium.createWorldTerrainAsync();
   } catch (e) {
     console.warn("World terrain unavailable, using flat ellipsoid.", e);
-  }
-  try {
-    const osm = await Cesium.createOsmBuildingsAsync();
-    osm.maximumScreenSpaceError = 24; // cheaper/faster than the 16 default, same reasoning as the globe setting above
-    mainViewer.scene.primitives.add(osm);
-  } catch (e) {
-    console.warn("OSM Buildings unavailable.", e);
   }
 }
 
@@ -1048,7 +1050,7 @@ function render() {
   // displayed unit, so a km/h leg still deflects the needle sensibly.
   const speedMphEquivalent = isStaticLeg ? 0
     : override ? (override.unit === "km/h" ? override.value * 0.621371 : override.value)
-    : (leg.avgSpeedMps || 0) * 2.23694;
+      : (leg.avgSpeedMps || 0) * 2.23694;
   const gaugeMax = leg.type === "flight" ? 600 : 100; // separate scales so driving speeds still read as meaningful needle deflection
   const gaugePct = R.clamp(speedMphEquivalent / gaugeMax, 0, 1);
   el.speedNeedle.style.transform = `rotate(${-90 + gaugePct * 180}deg)`;
@@ -1108,6 +1110,10 @@ function tick(nowMs) {
     if (lastFrameMs == null) lastFrameMs = nowMs;
     const dtMs = Math.min(nowMs - lastFrameMs, 100);
     lastFrameMs = nowMs;
+    
+    // ADD THIS LINE HERE:
+    logMemoryUsage(simSeconds);
+
     if (playing && hasStartedOnce) {
       simSeconds += (dtMs / 1000) * playbackMultiplier;
       if (simSeconds >= TOTAL_SIM) {
@@ -1116,7 +1122,7 @@ function tick(nowMs) {
       }
     }
     render();
-    requestAnimationFrame(tick); // only re-schedule if this frame actually succeeded
+    requestAnimationFrame(tick);
   } catch (err) {
     if (!fatalErrorReported) {
       fatalErrorReported = true;
@@ -1340,3 +1346,38 @@ function preloadPhotoMemories() {
     showFatalError(`boot() threw — nothing will render.\n${err.stack || err}`);
   }
 })();
+
+let memoryLogBuffer = [];
+let lastLogTime = 0;
+
+function logMemoryUsage(currentSimSeconds) {
+  if (window.performance && window.performance.memory) {
+    const usedMB = Math.round(window.performance.memory.usedJSHeapSize / (1024 * 1024));
+    const totalMB = Math.round(window.performance.memory.totalJSHeapSize / (1024 * 1024));
+    const limitMB = Math.round(window.performance.memory.jsHeapSizeLimit / (1024 * 1024));
+    
+    const timestamp = Math.round(currentSimSeconds);
+    const entry = `SimTime: ${timestamp}s | Used Heap: ${usedMB} MB | Total Heap: ${totalMB} MB | Limit: ${limitMB} MB`;
+    
+    if (timestamp - lastLogTime >= 60) {
+      console.log(`[MEMORY LOG] ${entry}`);
+      memoryLogBuffer.push(entry);
+      lastLogTime = timestamp;
+    }
+  }
+}
+
+function downloadMemoryLog() {
+  if (memoryLogBuffer.length === 0) return;
+  const blob = new Blob([memoryLogBuffer.join("\n")], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "memory-usage-log.txt";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+window.addEventListener("beforeunload", downloadMemoryLog);

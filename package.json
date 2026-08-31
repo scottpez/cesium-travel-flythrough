@@ -1,0 +1,12 @@
+{
+  "name": "cesium-travel-flythrough",
+  "version": "1.0.0",
+  "description": "Interactive Cesium.js route visualization",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.0",
+    "csso-cli": "^4.0.0"
+  }
+}
