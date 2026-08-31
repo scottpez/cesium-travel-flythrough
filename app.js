@@ -192,19 +192,22 @@ miniViewer.scene.screenSpaceCameraController.enableInputs = false;
 async function setupMinimapImagery() {
   miniViewer.imageryLayers.removeAll();
   let layer = null;
+  let provider = null;
   try {
     // Ion World Imagery: real satellite/aerial coverage, sharp down to city
     // block level. Needs a working Ion token (asset 2).
-    const provider = await Cesium.createWorldImageryAsync();
+    provider = await Cesium.createWorldImageryAsync();
     layer = miniViewer.imageryLayers.addImageryProvider(provider);
+    window.__miniSource = "ion-world-imagery";
   } catch (e) {
     console.warn("Ion World Imagery unavailable for minimap, falling back to OpenStreetMap.", e);
     try {
       // No-auth fallback, and the one that works while the Ion token is
       // broken. Raster map tiles only — this is NOT OSM Buildings. Sharp to
       // high zoom, which is the whole requirement here.
-      const provider = new Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" });
+      provider = new Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" });
       layer = miniViewer.imageryLayers.addImageryProvider(provider);
+      window.__miniSource = "openstreetmap";
     } catch (e2) {
       // This path used to return silently, so a failed basemap looked exactly
       // like a working one that happened to be dark.
@@ -222,11 +225,31 @@ async function setupMinimapImagery() {
   // a blank-looking minimap with nothing thrown and nothing logged. Any
   // replacement basemap here must hold up at 35km, not just at trip scale.
 
+  // Tile fetches fail ASYNCHRONOUSLY, long after the provider was constructed
+  // and the layer added — so a try/catch around construction cannot see them.
+  // That blind spot is why two different basemaps in a row appeared to load
+  // and then rendered nothing, with no exception and nothing in the console.
+  // errorEvent is the only place the real reason (404, CORS, blocked host,
+  // rate limit) ever surfaces. Reported once so a systemic failure can't spam
+  // the recording with a notice per tile.
+  let tileErrorReported = false;
+  if (provider && provider.errorEvent) {
+    provider.errorEvent.addEventListener((err) => {
+      window.__miniTileError = err;
+      console.warn("Minimap tile request failed.", err);
+      if (!tileErrorReported) {
+        tileErrorReported = true;
+        showNotice(`Minimap basemap tiles are failing to load (${window.__miniSource}).`, err);
+      }
+    });
+  }
+
   // Style it dark and stylized to match your seatback aesthetic
   layer.brightness = 0.45;
   layer.contrast = 1.2;
   layer.saturation = 0.3; // Desaturate it so the bright yellow route line pops
   window.__miniLayer = layer;
+  console.info(`Minimap basemap: ${window.__miniSource}`);
 }
 
 // Set once the photorealistic tileset loads; stays null if it's unavailable
@@ -1215,8 +1238,15 @@ function render() {
       `trail pts    ${miniTrail.length}\n` +
       `mini height  ${miniHeight?.toFixed(0) ?? "-"} m\n` +
       `mini layers  ${miniViewer.imageryLayers.length}\n` +
+      `mini source  ${window.__miniSource ?? "NONE — setupMinimapImagery bailed"}\n` +
       `mini l.show  ${window.__miniLayer?.show} alpha=${window.__miniLayer?.alpha}\n` +
-      `mini l.ready ${window.__miniLayer?.imageryProvider?.ready ?? window.__miniLayer?.ready}\n` +
+      // `.ready` was removed from ImageryProvider in Cesium's async refactor,
+      // so the old readout here was always undefined and told us nothing.
+      // These three are what actually distinguish "no layer" from "layer
+      // present but no tiles arriving" from "tiles arriving but invisible".
+      `mini l.bright ${window.__miniLayer?.brightness} sat=${window.__miniLayer?.saturation}\n` +
+      `mini tile err ${window.__miniTileError ? (window.__miniTileError.message || window.__miniTileError) : "none"}\n` +
+      `mini imagery  ${miniViewer.scene.globe.imageryLayersUpdatedEvent ? "globe ok" : "-"} baseColor=${miniViewer.scene.globe.baseColor?.toCssHexString?.() ?? "-"}\n` +
       `alignAxisLen ${window.__lastAlignedAxisDiffLen?.toExponential(2) ?? "-"}\n` +
       `billboards   ${mainViewer.scene.primitives.length} primitives, entities=${mainViewer.entities.values.length}`;
   }
