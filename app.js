@@ -100,8 +100,14 @@ const mainViewer = new Cesium.Viewer("cesiumMain", {
   infoBox: false,
   selectionIndicator: false,
   fullscreenButton: false,
-  imageryProvider: false, // <-- Disables default asset requests like Asset ID 2
-  baseLayer: false
+  // The base imagery layer is added explicitly in setupTerrainAndBuildings()
+  // rather than here, so its failure is caught and reported like everything
+  // else. It is NOT disabled: it's the surface that shows through wherever
+  // Google Photorealistic 3D Tiles has no coverage. With no base layer the
+  // globe renders as `globe.baseColor` — "the color of the globe when no
+  // imagery is available" — so a coverage gap read as a blank sphere rather
+  // than as lower-detail ground.
+  baseLayer: false,
 });
 mainViewer.clock.shouldAnimate = false;
 // Aggressive detail + massive tile cache: with your 47GB GPU, we can afford
@@ -182,31 +188,56 @@ async function setupMinimapImagery() {
   window.__miniLayer = layer;
 }
 
+// Set once the photorealistic tileset loads; stays null if it's unavailable
+// or disabled. Used by the per-leg coverage toggle in render().
+let photoTileset = null;
+
+// Google Photorealistic 3D Tiles is not global — coverage is dense over the
+// US/Europe/Japan and much thinner elsewhere, and there is none at all over
+// open ocean. Those gaps used to render as a bare untextured ellipsoid,
+// because the globe had no imagery (baseLayer: false) and World Terrain was
+// only ever assigned in this function's failure path — the success path
+// returned before reaching it. So the globe is now always set up FIRST, as
+// the floor the photorealistic tiles sit on top of. Where Google has
+// coverage you never see it; where it doesn't, the gap degrades to real
+// terrain under satellite imagery instead of to nothing.
 async function setupTerrainAndBuildings() {
-  if (USE_PHOTOREALISTIC_TILES) {
-    try {
-      const tileset = await Promise.resolve(Cesium.createGooglePhotorealistic3DTileset(
-        GOOGLE_MAPS_API_KEY, // <-- 1st argument: The key string
-        {                    // <-- 2nd argument: The options object
-          maximumMemoryUsage: 2048,
-          maximumCachedBytes: 1073741824,
-          cullRequestsWhileMoving: true,
-          skipLevelOfDetail: true,
-          immediatelyLoadDesiredLevelOfDetail: true,
-          loadSiblings: false
-        }
-      ));
-      mainViewer.scene.primitives.add(tileset);
-      return;
-    } catch (e) {
-      console.warn("Photorealistic 3D Tiles unavailable, falling back to World Terrain.", e);
-      showNotice("Photorealistic 3D Tiles unavailable (check your API key/scopes) — using World Terrain instead.");
-    }
-  }
   try {
     mainViewer.terrainProvider = await Cesium.createWorldTerrainAsync();
   } catch (e) {
     console.warn("World terrain unavailable, using flat ellipsoid.", e);
+    showNotice("Cesium World Terrain unavailable — gaps in photorealistic coverage will render flat.");
+  }
+  try {
+    mainViewer.imageryLayers.addImageryProvider(await Cesium.createWorldImageryAsync());
+  } catch (e) {
+    console.warn("World imagery unavailable, globe will be untextured.", e);
+    showNotice("World imagery unavailable — gaps in photorealistic coverage will render untextured.");
+  }
+
+  if (!USE_PHOTOREALISTIC_TILES) return;
+  try {
+    const tileset = await Promise.resolve(Cesium.createGooglePhotorealistic3DTileset(
+      GOOGLE_MAPS_API_KEY, // <-- 1st argument: The key string
+      {                    // <-- 2nd argument: The options object
+        // Memory ceiling. `maximumMemoryUsage` and `maximumCachedBytes` were
+        // tried here first and are silently ignored: the former was removed
+        // from Cesium3DTileset (it survives only on PointCloudShading), and
+        // the latter has never been an option. These two are the real names,
+        // both in bytes; the hard ceiling is their sum.
+        cacheBytes: 1073741824,               // 1 GB steady state
+        maximumCacheOverflowBytes: 268435456, // + 256 MB headroom for one view
+        cullRequestsWhileMoving: true,
+        skipLevelOfDetail: true,
+        immediatelyLoadDesiredLevelOfDetail: true,
+        loadSiblings: false,
+      }
+    ));
+    mainViewer.scene.primitives.add(tileset);
+    photoTileset = tileset;
+  } catch (e) {
+    console.warn("Photorealistic 3D Tiles unavailable, falling back to World Terrain.", e);
+    showNotice("Photorealistic 3D Tiles unavailable (check your API key/scopes) — using World Terrain instead.");
   }
 }
 
@@ -932,6 +963,18 @@ function render() {
     if (leg.poiStart) showPoi(leg.poiStart, "");
     else if (leg.poi) showPoi(leg.poi, "");
     el.legName.textContent = leg.label;
+    // The globe (terrain + imagery) stays visible by default so it is always
+    // there to fill photorealistic coverage gaps — that default is the whole
+    // point, and forgetting to flag a leg costs a little z-fighting rather
+    // than an empty sky. Where the tiles and the globe both draw ground the
+    // two surfaces can shimmer against each other; set `hideGlobe: true` on
+    // a leg in itinerary.js to suppress the globe there. Only do that for
+    // legs with complete photorealistic coverage — there is no coverage over
+    // open ocean, so the transatlantic leg must never carry this flag.
+    // Per-leg data rather than runtime coverage detection: the route is
+    // fixed, and there's no coverage API worth polling 60 times a second to
+    // rediscover something the itinerary can simply state.
+    mainViewer.scene.globe.show = !(photoTileset && leg.hideGlobe);
     if (leg.celebration && hasStartedOnce) {
       clearTimeout(leg._celebScheduled);
       leg._celebScheduled = setTimeout(() => triggerCelebration(leg.celebration), leg.celebration.delay || 0);
@@ -1297,7 +1340,15 @@ function startJourney() {
 
 // ================================================================= BOOT ==
 // Exposes internals for console-based debugging (window.__DEBUG__ in devtools).
-window.__DEBUG__ = { mainViewer, miniViewer, mainVehicle, miniMarker, LEGS, startJourney, downloadCueSheet };
+// `photoTileset` is a getter because the tileset is assigned asynchronously
+// during boot — a plain property would capture the null it starts as. Handy
+// in devtools for checking coverage and memory against a live leg:
+//   __DEBUG__.photoTileset.totalMemoryUsageInBytes
+//   __DEBUG__.photoTileset.statistics
+window.__DEBUG__ = {
+  mainViewer, miniViewer, mainVehicle, miniMarker, LEGS, startJourney, downloadCueSheet,
+  get photoTileset() { return photoTileset; },
+};
 
 // Quietly warms the browser image cache for every photo-memory asset so the
 // first appearance of each polaroid is instant, not a stutter while an 8MB+
