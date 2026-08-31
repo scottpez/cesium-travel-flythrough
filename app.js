@@ -1035,7 +1035,9 @@ function render() {
   if (playing && hasStartedOnce && simSeconds - lastPrefetchTime > 30) {
     lastPrefetchTime = simSeconds;
     const prefetchSim = Math.min(simSeconds + prefetchAheadSeconds, TOTAL_SIM);
-    const prefetchState = interpolateRoute(prefetchSim);
+    const prefetchLeg = findLegAt(prefetchSim);
+    const prefetchLegFrac = prefetchLeg.simDuration > 0 ? R.clamp((prefetchSim - prefetchLeg.simStart) / prefetchLeg.simDuration, 0, 1) : 1;
+    const prefetchState = computeState(prefetchLeg, prefetchLegFrac);
     if (prefetchState) {
       const prefetchCam = mainViewer.camera;
       const savedPos = prefetchCam.position.clone();
