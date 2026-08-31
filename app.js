@@ -12,7 +12,6 @@ import { VEHICLE_DEFS, applyVehicleStyle } from "./vehicles.js";
 import { applyFlagSwatch } from "./flags.js";
 
 Cesium.Ion.defaultAccessToken = ION_ACCESS_TOKEN;
-Cesium.GoogleMaps.defaultApiKey = GOOGLE_MAPS_API_KEY; // This tells Cesium how to authenticate Google requests correctly
 
 // ---- On-screen error banner ------------------------------------------------
 // Registered before anything else runs so it catches viewer-construction
@@ -182,13 +181,10 @@ async function setupMinimapImagery() {
 async function setupTerrainAndBuildings() {
   if (USE_PHOTOREALISTIC_TILES) {
     try {
-      // Verified against the actual 1.121 bundle: the exported name is
-      // createGooglePhotorealistic3DTileset (no "Async" suffix), unlike most
-      // other Cesium docs/examples floating around. Wrapping in Promise.resolve
-      // handles it whether or not it returns a promise.
       const tileset = await Promise.resolve(Cesium.createGooglePhotorealistic3DTileset({
-        maximumMemoryUsage: 2048, // 2GB limit
-        maximumCachedBytes: 1073741824, // Hard cap cache at 1GB
+        key: GOOGLE_MAPS_API_KEY,           // <-- Explicitly pass the string key here
+        maximumMemoryUsage: 2048,           // 2GB limit
+        maximumCachedBytes: 1073741824,     // Hard cap cache at 1GB
         cullRequestsWhileMoving: true,
         skipLevelOfDetail: true,
         immediatelyLoadDesiredLevelOfDetail: true,
@@ -197,8 +193,8 @@ async function setupTerrainAndBuildings() {
       mainViewer.scene.primitives.add(tileset);
       return;
     } catch (e) {
-      console.warn("Photorealistic 3D Tiles unavailable, falling back to World Terrain + OSM Buildings.", e);
-      showNotice("Photorealistic 3D Tiles unavailable (check your Ion token's scopes) — using World Terrain + OSM Buildings instead.");
+      console.warn("Photorealistic 3D Tiles unavailable, falling back to World Terrain.", e);
+      showNotice("Photorealistic 3D Tiles unavailable (check your API key/scopes) — using World Terrain instead.");
     }
   }
   try {
