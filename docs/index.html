@@ -4,6 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kuwait → USA · Our Journey</title>
+  <!-- Cesium resolves its bundled assets (the Natural Earth II minimap
+       basemap, web workers, glTF shaders) relative to CESIUM_BASE_URL. When
+       Cesium is loaded from the CDN and this is unset, buildModuleUrl() has
+       no reliable base to resolve against and those fetches fail — which is
+       why the minimap rendered as an empty dark void. Must be set BEFORE the
+       Cesium script tag, and must match the release pinned below. -->
+  <script>window.CESIUM_BASE_URL = "https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/";</script>
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
   <link href="style.css" rel="stylesheet">

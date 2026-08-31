@@ -125,11 +125,19 @@ const mainViewer = new Cesium.Viewer("cesiumMain", {
   baseLayer: false,
 });
 mainViewer.clock.shouldAnimate = false;
-// Aggressive detail + massive tile cache: with your 47GB GPU, we can afford
-// higher LOD (lower screenSpaceError) and keep way more tiles in VRAM.
-// This ensures photorealistic tiles are crisp throughout, even during record-speed playback.
-mainViewer.scene.globe.maximumScreenSpaceError = 1.0;
-mainViewer.scene.globe.tileCacheSize = 15000;
+// The globe is a BACKDROP, not the main surface. It exists only to fill the
+// holes where Google Photorealistic 3D Tiles has no coverage, so it should be
+// cheap: every terrain/imagery request it makes competes with the tileset for
+// the same connection pool and bandwidth.
+//
+// These were previously 1.0 / 15000, chosen to make the photorealistic tiles
+// crisper. They never did — the globe and a Cesium3DTileset are separate
+// subsystems and the tileset ignores both. They were harmless only because
+// the globe had no terrain or imagery assigned. Now that it does, SSE 1.0
+// (vs. the 2.0 default) demands roughly 4x the tile density, and all of it is
+// bandwidth taken away from the tiles you actually want.
+mainViewer.scene.globe.maximumScreenSpaceError = 3.0;
+mainViewer.scene.globe.tileCacheSize = 1000;
 mainViewer.scene.globe.enableLighting = true;
 mainViewer.scene.skyAtmosphere.show = true;
 mainViewer.scene.fog.enabled = true;
@@ -185,15 +193,31 @@ async function setupMinimapImagery() {
   miniViewer.imageryLayers.removeAll();
   let layer = null;
   try {
-    // Use the built-in, bundled Natural Earth II low-res global map.
-    // This provides a clean continent/landmass basemap without network bloat or memory leaks.
+    // Natural Earth II ships with CesiumJS: a clean shaded-relief landmass
+    // map with no labels, roads or borders — exactly the "simple basemap"
+    // look this minimap wants, and no network or auth beyond the Cesium
+    // bundle itself. Requires CESIUM_BASE_URL (set in index.html) so
+    // buildModuleUrl can resolve it off the CDN.
     const provider = await Cesium.TileMapServiceImageryProvider.fromUrl(
       Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII")
     );
     layer = miniViewer.imageryLayers.addImageryProvider(provider);
   } catch (e) {
-    console.warn("Natural Earth II fallback failed.", e);
-    return;
+    console.warn("Natural Earth II unavailable, trying OpenStreetMap raster tiles.", e);
+    try {
+      // Raster map tiles only — this is not OSM Buildings. Needs no token,
+      // so it still works when the Ion credentials are the thing that's
+      // broken. Busier than Natural Earth II, but the styling below tones it
+      // down, and a busy map beats a blank one.
+      const provider = new Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" });
+      layer = miniViewer.imageryLayers.addImageryProvider(provider);
+    } catch (e2) {
+      // Previously this path returned silently, so a failed basemap was
+      // indistinguishable from a working one that happened to be dark.
+      console.warn("No minimap basemap available; minimap will stay a flat dark void.", e2);
+      showNotice("Minimap basemap unavailable — the route map will render as a flat dark void.", e2);
+      return;
+    }
   }
 
   // Style it dark and stylized to match your seatback aesthetic
@@ -242,9 +266,41 @@ async function setupTerrainAndBuildings() {
         // both in bytes; the hard ceiling is their sum.
         cacheBytes: 1073741824,               // 1 GB steady state
         maximumCacheOverflowBytes: 268435456, // + 256 MB headroom for one view
-        cullRequestsWhileMoving: true,
+
+        // The tileset's OWN detail knob (default 16). scene.globe's
+        // maximumScreenSpaceError has no effect here — different subsystem.
+        // This is the single biggest lever on how much photogrammetry has to
+        // arrive before a frame looks finished. A camera moving this fast
+        // cannot resolve 16 anyway.
+        maximumScreenSpaceError: 24,
+
+        // Descend straight to the LOD we need instead of loading every level
+        // on the way down. Essential when a flight leg drops from 10,000m to
+        // ground in a few seconds.
         skipLevelOfDetail: true,
-        immediatelyLoadDesiredLevelOfDetail: true,
+
+        // NOT immediatelyLoadDesiredLevelOfDetail. That flag means "only
+        // tiles that meet the maximum screen space error will ever be
+        // downloaded" — no coarse tile is loaded first, so the ground stays
+        // empty until the full-resolution tile arrives, with nothing shown in
+        // between. It reads as exactly the slow, late-loading ground it was
+        // meant to prevent.
+
+        // Put a rough layer down fast, then refine, rather than waiting for
+        // full resolution before drawing anything.
+        progressiveResolutionHeightFraction: 0.5,
+
+        // Discard requests the camera has already flown past instead of
+        // paying to fetch and decode ground we've left behind.
+        cullRequestsWhileMoving: true,
+        cullRequestsWhileMovingMultiplier: 120.0,
+
+        // Tiles outside the centre cone are normally deferred until the
+        // camera has been still for foveatedTimeDelay seconds. This camera is
+        // never still, so with the 0.2s default the edges of frame would
+        // never fill in at all.
+        foveatedTimeDelay: 0.0,
+
         loadSiblings: false,
       }
     ));
