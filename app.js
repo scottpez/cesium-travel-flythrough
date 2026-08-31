@@ -88,7 +88,7 @@ const el = {
 
 // ============================================================== VIEWERS ===
 const mainViewer = new Cesium.Viewer("cesiumMain", {
-  useDefaultRenderLoop: false, // we drive rendering manually in one rAF loop below
+  useDefaultRenderLoop: false,
   shouldAnimate: false,
   animation: false,
   timeline: false,
@@ -100,6 +100,8 @@ const mainViewer = new Cesium.Viewer("cesiumMain", {
   infoBox: false,
   selectionIndicator: false,
   fullscreenButton: false,
+  imageryProvider: false, // <-- Disables default asset requests like Asset ID 2
+  baseLayer: false
 });
 mainViewer.clock.shouldAnimate = false;
 // Aggressive detail + massive tile cache: with your 47GB GPU, we can afford
@@ -133,6 +135,7 @@ const miniViewer = new Cesium.Viewer("cesiumMini", {
   selectionIndicator: false,
   fullscreenButton: false,
   terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+  baseLayer: false,
 });
 miniViewer.scene.globe.enableLighting = false;
 miniViewer.scene.globe.baseColor = Cesium.Color.fromCssColorString("#0a1220");
@@ -183,8 +186,9 @@ async function setupTerrainAndBuildings() {
   if (USE_PHOTOREALISTIC_TILES) {
     try {
       const tileset = await Promise.resolve(Cesium.createGooglePhotorealistic3DTileset({
-        maximumMemoryUsage: 2048,           // 2GB limit
-        maximumCachedBytes: 1073741824,     // Hard cap cache at 1GB
+        key: GOOGLE_MAPS_API_KEY,           // <-- Add this explicitly
+        maximumMemoryUsage: 2048,
+        maximumCachedBytes: 1073741824,
         cullRequestsWhileMoving: true,
         skipLevelOfDetail: true,
         immediatelyLoadDesiredLevelOfDetail: true,
@@ -1106,7 +1110,7 @@ function tick(nowMs) {
     if (lastFrameMs == null) lastFrameMs = nowMs;
     const dtMs = Math.min(nowMs - lastFrameMs, 100);
     lastFrameMs = nowMs;
-    
+
     // ADD THIS LINE HERE:
     logMemoryUsage(simSeconds);
 
@@ -1351,10 +1355,10 @@ function logMemoryUsage(currentSimSeconds) {
     const usedMB = Math.round(window.performance.memory.usedJSHeapSize / (1024 * 1024));
     const totalMB = Math.round(window.performance.memory.totalJSHeapSize / (1024 * 1024));
     const limitMB = Math.round(window.performance.memory.jsHeapSizeLimit / (1024 * 1024));
-    
+
     const timestamp = Math.round(currentSimSeconds);
     const entry = `SimTime: ${timestamp}s | Used Heap: ${usedMB} MB | Total Heap: ${totalMB} MB | Limit: ${limitMB} MB`;
-    
+
     if (timestamp - lastLogTime >= 60) {
       console.log(`[MEMORY LOG] ${entry}`);
       memoryLogBuffer.push(entry);

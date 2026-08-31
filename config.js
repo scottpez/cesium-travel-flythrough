@@ -8,9 +8,8 @@
 //    / Photorealistic Tiles access enabled on ion.cesium.com.
 // ============================================================================
 
-export const ION_ACCESS_TOKEN =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6ImNGVGJUTVVVZ0VsMy1LcmIiLCJqdGkiOiI3MjYzOGZhYi1lY2MyLTQyYTItODhjZC0wMDY2MzlhMTM1NGMiLCJpZCI6MjM2OTQ3LCJzdWIiOiJzY29wZXoiLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoic2NvdHRwZXotdHJhdmVsLWFwcCIsImlhdCI6MTc4ODE5Njk3N30.fFKNranOk_FHlemAPw2lsT6RBSPtKNX6cboj6vMt_lc";
-
+// ✅ Correct (Plain strings)
+export const ION_ACCESS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6ImNGVGJUTVVVZ0VsMy1LcmIiLCJqdGkiOiI3MjYzOGZhYi1lY2MyLTQyYTItODhjZC0wMDY2MzlhMTM1NGMiLCJpZCI6MjM2OTQ3LCJzdWIiOiJzY29wZXoiLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoic2NvdHRwZXotdHJhdmVsLWFwcCIsImlhdCI6MTc4ODE5Njk3N30.fFKNranOk_FHlemAPw2lsT6RBSPtKNX6cboj6vMt_lc";
 export const GOOGLE_MAPS_API_KEY = "AIzaSyD5RYAIHh7WaIZWHSvXV4tU77LVcoab7aU";
 
 // Google Photorealistic 3D Tiles: real photogrammetry (actual textured
