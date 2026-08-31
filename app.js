@@ -193,32 +193,34 @@ async function setupMinimapImagery() {
   miniViewer.imageryLayers.removeAll();
   let layer = null;
   try {
-    // Natural Earth II ships with CesiumJS: a clean shaded-relief landmass
-    // map with no labels, roads or borders — exactly the "simple basemap"
-    // look this minimap wants, and no network or auth beyond the Cesium
-    // bundle itself. Requires CESIUM_BASE_URL (set in index.html) so
-    // buildModuleUrl can resolve it off the CDN.
-    const provider = await Cesium.TileMapServiceImageryProvider.fromUrl(
-      Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII")
-    );
+    // Ion World Imagery: real satellite/aerial coverage, sharp down to city
+    // block level. Needs a working Ion token (asset 2).
+    const provider = await Cesium.createWorldImageryAsync();
     layer = miniViewer.imageryLayers.addImageryProvider(provider);
   } catch (e) {
-    console.warn("Natural Earth II unavailable, trying OpenStreetMap raster tiles.", e);
+    console.warn("Ion World Imagery unavailable for minimap, falling back to OpenStreetMap.", e);
     try {
-      // Raster map tiles only — this is not OSM Buildings. Needs no token,
-      // so it still works when the Ion credentials are the thing that's
-      // broken. Busier than Natural Earth II, but the styling below tones it
-      // down, and a busy map beats a blank one.
+      // No-auth fallback, and the one that works while the Ion token is
+      // broken. Raster map tiles only — this is NOT OSM Buildings. Sharp to
+      // high zoom, which is the whole requirement here.
       const provider = new Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" });
       layer = miniViewer.imageryLayers.addImageryProvider(provider);
     } catch (e2) {
-      // Previously this path returned silently, so a failed basemap was
-      // indistinguishable from a working one that happened to be dark.
+      // This path used to return silently, so a failed basemap looked exactly
+      // like a working one that happened to be dark.
       console.warn("No minimap basemap available; minimap will stay a flat dark void.", e2);
       showNotice("Minimap basemap unavailable — the route map will render as a flat dark void.", e2);
       return;
     }
   }
+  // NOT Natural Earth II. It is bundled with CesiumJS and needs no auth, which
+  // makes it a tempting default, but it ships only 3 zoom levels — 19.6km per
+  // pixel at its finest, per its own tilemapresource.xml. updateMiniCamera()
+  // floors the minimap camera at 35km altitude, which frames roughly 40km of
+  // ground, so NE2 resolves to about two pixels of texture stretched across
+  // the whole inset. It loads without error and renders a featureless smudge:
+  // a blank-looking minimap with nothing thrown and nothing logged. Any
+  // replacement basemap here must hold up at 35km, not just at trip scale.
 
   // Style it dark and stylized to match your seatback aesthetic
   layer.brightness = 0.45;
