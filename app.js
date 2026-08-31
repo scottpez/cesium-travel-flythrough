@@ -12,6 +12,7 @@ import { VEHICLE_DEFS, applyVehicleStyle } from "./vehicles.js";
 import { applyFlagSwatch } from "./flags.js";
 
 Cesium.Ion.defaultAccessToken = ION_ACCESS_TOKEN;
+Cesium.GoogleMaps.defaultApiKey = GOOGLE_MAPS_API_KEY;
 
 // ---- On-screen error banner ------------------------------------------------
 // Registered before anything else runs so it catches viewer-construction
@@ -182,7 +183,6 @@ async function setupTerrainAndBuildings() {
   if (USE_PHOTOREALISTIC_TILES) {
     try {
       const tileset = await Promise.resolve(Cesium.createGooglePhotorealistic3DTileset({
-        key: GOOGLE_MAPS_API_KEY,           // <-- Explicitly pass the string key here
         maximumMemoryUsage: 2048,           // 2GB limit
         maximumCachedBytes: 1073741824,     // Hard cap cache at 1GB
         cullRequestsWhileMoving: true,
