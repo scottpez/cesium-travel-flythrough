@@ -189,67 +189,123 @@ miniViewer.scene.screenSpaceCameraController.enableInputs = false;
 // tiles are the no-auth fallback if that token lacks imagery scope — still
 // far sharper than Natural Earth II. Darkened/desaturated either way to
 // keep the stylized "seatback map" look instead of a busy, literal basemap.
+// Basemap candidates for the minimap, best-looking first.
+//
+// Each carries a `probe`: a real tile URL. Before a provider is used it is
+// tested with an actual cross-origin fetch of that tile, because Cesium gives
+// no usable signal when a basemap fails. A provider constructs fine and adds
+// its layer fine, then its tile requests fail asynchronously — 403, CORS,
+// blocked host, rate limit — and the globe silently renders `baseColor`. That
+// looks identical to a working dark basemap, which is how two different
+// basemaps in a row appeared to load while showing nothing. A fetch of the
+// same URL Cesium would request, under the same CORS rules Cesium needs for
+// WebGL textures, is the only thing that answers the question directly.
+//
+// NOT Natural Earth II. It is bundled with CesiumJS and needs no auth, which
+// makes it a tempting default, but it ships only 3 zoom levels — 19.6km per
+// pixel at its finest, per its own tilemapresource.xml. updateMiniCamera()
+// floors the minimap camera at 35km, framing roughly 40km of ground, so NE2
+// resolves to about two pixels of texture stretched across the whole inset:
+// it loads without error and renders a featureless smudge. Any basemap here
+// must hold up at 35km, not just at trip scale.
+const MINIMAP_BASEMAPS = [
+  {
+    name: "carto-dark",
+    // Free, no key, CORS-enabled, and already the dark cartographic style
+    // this seatback map wants — so it needs far less brightness knocked out
+    // of it than a satellite basemap does.
+    probe: "https://basemaps.cartocdn.com/dark_all/4/8/6.png",
+    style: { brightness: 1.0, contrast: 1.1, saturation: 0.8 },
+    create: () => new Cesium.UrlTemplateImageryProvider({
+      url: "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+      credit: new Cesium.Credit("© OpenStreetMap contributors © CARTO"),
+      maximumLevel: 18,
+    }),
+  },
+  {
+    name: "esri-world-imagery",
+    // Satellite, no key. Note the {z}/{y}/{x} ordering — Esri's REST tile
+    // scheme puts row before column, unlike every other entry here.
+    probe: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/4/6/8",
+    style: { brightness: 0.55, contrast: 1.2, saturation: 0.35 },
+    create: () => new Cesium.UrlTemplateImageryProvider({
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      credit: new Cesium.Credit("Esri, Maxar, Earthstar Geographics"),
+      maximumLevel: 19,
+    }),
+  },
+  {
+    name: "openstreetmap",
+    // Raster map tiles only — NOT OSM Buildings. Last because OSM's tile
+    // usage policy actively blocks bulk and non-browser-looking clients, so
+    // it is the likeliest of these to hard-fail.
+    probe: "https://tile.openstreetmap.org/4/8/6.png",
+    style: { brightness: 0.6, contrast: 1.2, saturation: 0.3 },
+    create: () => new Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" }),
+  },
+];
+
+// Fetch one tile the way Cesium would. Resolves to a short status string
+// rather than throwing, so one dead host can't abort the whole probe.
+async function probeTile(url, timeoutMs = 6000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { mode: "cors", cache: "no-store", signal: ctl.signal });
+    return { ok: res.ok, detail: `HTTP ${res.status}` };
+  } catch (e) {
+    // A CORS rejection surfaces here as an opaque TypeError. That is itself
+    // the answer: if fetch can't read it, WebGL can't texture from it either.
+    return { ok: false, detail: ctl.signal.aborted ? "timeout" : `blocked/CORS (${e.name})` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function setupMinimapImagery() {
   miniViewer.imageryLayers.removeAll();
-  let layer = null;
-  let provider = null;
+
+  // Ion World Imagery first when the token actually works — it's the sharpest
+  // option and needs no third-party host. Unlike the candidates below this
+  // one does reject on failure, so a try/catch is sufficient here.
   try {
-    // Ion World Imagery: real satellite/aerial coverage, sharp down to city
-    // block level. Needs a working Ion token (asset 2).
-    provider = await Cesium.createWorldImageryAsync();
-    layer = miniViewer.imageryLayers.addImageryProvider(provider);
+    const provider = await Cesium.createWorldImageryAsync();
+    const layer = miniViewer.imageryLayers.addImageryProvider(provider);
+    layer.brightness = 0.55; layer.contrast = 1.2; layer.saturation = 0.35;
+    window.__miniLayer = layer;
     window.__miniSource = "ion-world-imagery";
+    window.__miniProbe = [{ name: "ion-world-imagery", ok: true, detail: "asset 2 OK" }];
+    console.info("Minimap basemap: ion-world-imagery");
+    return;
   } catch (e) {
-    console.warn("Ion World Imagery unavailable for minimap, falling back to OpenStreetMap.", e);
-    try {
-      // No-auth fallback, and the one that works while the Ion token is
-      // broken. Raster map tiles only — this is NOT OSM Buildings. Sharp to
-      // high zoom, which is the whole requirement here.
-      provider = new Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" });
-      layer = miniViewer.imageryLayers.addImageryProvider(provider);
-      window.__miniSource = "openstreetmap";
-    } catch (e2) {
-      // This path used to return silently, so a failed basemap looked exactly
-      // like a working one that happened to be dark.
-      console.warn("No minimap basemap available; minimap will stay a flat dark void.", e2);
-      showNotice("Minimap basemap unavailable — the route map will render as a flat dark void.", e2);
-      return;
-    }
-  }
-  // NOT Natural Earth II. It is bundled with CesiumJS and needs no auth, which
-  // makes it a tempting default, but it ships only 3 zoom levels — 19.6km per
-  // pixel at its finest, per its own tilemapresource.xml. updateMiniCamera()
-  // floors the minimap camera at 35km altitude, which frames roughly 40km of
-  // ground, so NE2 resolves to about two pixels of texture stretched across
-  // the whole inset. It loads without error and renders a featureless smudge:
-  // a blank-looking minimap with nothing thrown and nothing logged. Any
-  // replacement basemap here must hold up at 35km, not just at trip scale.
-
-  // Tile fetches fail ASYNCHRONOUSLY, long after the provider was constructed
-  // and the layer added — so a try/catch around construction cannot see them.
-  // That blind spot is why two different basemaps in a row appeared to load
-  // and then rendered nothing, with no exception and nothing in the console.
-  // errorEvent is the only place the real reason (404, CORS, blocked host,
-  // rate limit) ever surfaces. Reported once so a systemic failure can't spam
-  // the recording with a notice per tile.
-  let tileErrorReported = false;
-  if (provider && provider.errorEvent) {
-    provider.errorEvent.addEventListener((err) => {
-      window.__miniTileError = err;
-      console.warn("Minimap tile request failed.", err);
-      if (!tileErrorReported) {
-        tileErrorReported = true;
-        showNotice(`Minimap basemap tiles are failing to load (${window.__miniSource}).`, err);
-      }
-    });
+    console.warn("Ion World Imagery unavailable for minimap, probing no-auth basemaps.", e);
   }
 
-  // Style it dark and stylized to match your seatback aesthetic
-  layer.brightness = 0.45;
-  layer.contrast = 1.2;
-  layer.saturation = 0.3; // Desaturate it so the bright yellow route line pops
-  window.__miniLayer = layer;
-  console.info(`Minimap basemap: ${window.__miniSource}`);
+  const results = [];
+  for (const cand of MINIMAP_BASEMAPS) {
+    const r = await probeTile(cand.probe);
+    results.push({ name: cand.name, ok: r.ok, detail: r.detail });
+    if (!r.ok) continue;
+
+    const layer = miniViewer.imageryLayers.addImageryProvider(cand.create());
+    layer.brightness = cand.style.brightness;
+    layer.contrast = cand.style.contrast;
+    layer.saturation = cand.style.saturation;
+    window.__miniLayer = layer;
+    window.__miniSource = cand.name;
+    window.__miniProbe = results;
+    console.info(`Minimap basemap: ${cand.name}`, results);
+    return;
+  }
+
+  // Every candidate failed. Say so loudly and say WHY for each one — a silent
+  // return here is what made this look like a rendering bug for three rounds
+  // of debugging rather than a network one.
+  window.__miniProbe = results;
+  window.__miniSource = null;
+  const summary = results.map((r) => `${r.name}: ${r.detail}`).join(" · ");
+  console.error("No minimap basemap reachable.", results);
+  showNotice(`Minimap basemap unreachable — every source failed. ${summary}`);
 }
 
 // Set once the photorealistic tileset loads; stays null if it's unavailable
@@ -1238,15 +1294,14 @@ function render() {
       `trail pts    ${miniTrail.length}\n` +
       `mini height  ${miniHeight?.toFixed(0) ?? "-"} m\n` +
       `mini layers  ${miniViewer.imageryLayers.length}\n` +
-      `mini source  ${window.__miniSource ?? "NONE — setupMinimapImagery bailed"}\n` +
+      `mini source  ${window.__miniSource ?? "NONE — every basemap failed"}\n` +
       `mini l.show  ${window.__miniLayer?.show} alpha=${window.__miniLayer?.alpha}\n` +
       // `.ready` was removed from ImageryProvider in Cesium's async refactor,
       // so the old readout here was always undefined and told us nothing.
-      // These three are what actually distinguish "no layer" from "layer
-      // present but no tiles arriving" from "tiles arriving but invisible".
+      // The probe table below is the real diagnostic: it says, per source,
+      // whether the browser can actually fetch a tile and why not if it can't.
       `mini l.bright ${window.__miniLayer?.brightness} sat=${window.__miniLayer?.saturation}\n` +
-      `mini tile err ${window.__miniTileError ? (window.__miniTileError.message || window.__miniTileError) : "none"}\n` +
-      `mini imagery  ${miniViewer.scene.globe.imageryLayersUpdatedEvent ? "globe ok" : "-"} baseColor=${miniViewer.scene.globe.baseColor?.toCssHexString?.() ?? "-"}\n` +
+      (window.__miniProbe ?? []).map((r) => `  probe ${r.ok ? "OK  " : "FAIL"} ${r.name}: ${r.detail}\n`).join("") +
       `alignAxisLen ${window.__lastAlignedAxisDiffLen?.toExponential(2) ?? "-"}\n` +
       `billboards   ${mainViewer.scene.primitives.length} primitives, entities=${mainViewer.entities.values.length}`;
   }
