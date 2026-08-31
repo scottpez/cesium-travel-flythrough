@@ -1195,6 +1195,8 @@ el.btnPlay.addEventListener("click", () => {
 function clearPendingCelebrations() {
   for (const leg of LEGS) clearTimeout(leg._celebScheduled);
   clearTimeout(celebTimer);
+  clearInterval(factRotateTimer);
+  factRotateTimer = null;
   el.celebration.classList.remove("show");
   el.confettiLayer.innerHTML = "";
 }
