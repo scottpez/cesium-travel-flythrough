@@ -167,7 +167,10 @@ const miniViewer = new Cesium.Viewer("cesiumMini", {
   baseLayer: false,
 });
 miniViewer.scene.globe.enableLighting = false;
-miniViewer.scene.globe.baseColor = Cesium.Color.fromCssColorString("#0a1220");
+// Shows through until basemap tiles arrive, and at the very edges of the
+// globe. Kept a shade under the lightened basemap so the load-in reads as
+// tiles filling in rather than as the map flashing brighter.
+miniViewer.scene.globe.baseColor = Cesium.Color.fromCssColorString("#16212f");
 miniViewer.scene.skyAtmosphere.show = false;
 miniViewer.scene.sun.show = false;
 miniViewer.scene.moon.show = false;
@@ -208,6 +211,15 @@ miniViewer.scene.screenSpaceCameraController.enableInputs = false;
 // resolves to about two pixels of texture stretched across the whole inset:
 // it loads without error and renders a featureless smudge. Any basemap here
 // must hold up at 35km, not just at trip scale.
+// One knob for overall minimap basemap brightness, applied on top of each
+// candidate's own tuned baseline below. The candidates start at very
+// different exposures — Carto's dark style is already dark by design, Esri's
+// satellite imagery is bright and gets pulled down hard — so a single
+// absolute brightness value can't serve all of them. Scaling their baselines
+// keeps their relative look intact while letting one number lift the lot.
+// 1.0 = each candidate's own baseline. Raise to lighten.
+const MINIMAP_BRIGHTNESS = 1.45;
+
 const MINIMAP_BASEMAPS = [
   {
     name: "carto-dark",
@@ -271,7 +283,8 @@ async function setupMinimapImagery() {
   try {
     const provider = await Cesium.createWorldImageryAsync();
     const layer = miniViewer.imageryLayers.addImageryProvider(provider);
-    layer.brightness = 0.55; layer.contrast = 1.2; layer.saturation = 0.35;
+    window.__miniBaseBrightness = 0.55;
+    layer.brightness = 0.55 * MINIMAP_BRIGHTNESS; layer.contrast = 1.2; layer.saturation = 0.35;
     window.__miniLayer = layer;
     window.__miniSource = "ion-world-imagery";
     window.__miniProbe = [{ name: "ion-world-imagery", ok: true, detail: "asset 2 OK" }];
@@ -288,7 +301,8 @@ async function setupMinimapImagery() {
     if (!r.ok) continue;
 
     const layer = miniViewer.imageryLayers.addImageryProvider(cand.create());
-    layer.brightness = cand.style.brightness;
+    window.__miniBaseBrightness = cand.style.brightness;
+    layer.brightness = cand.style.brightness * MINIMAP_BRIGHTNESS;
     layer.contrast = cand.style.contrast;
     layer.saturation = cand.style.saturation;
     window.__miniLayer = layer;
@@ -1506,6 +1520,16 @@ function startJourney() {
 window.__DEBUG__ = {
   mainViewer, miniViewer, mainVehicle, miniMarker, LEGS, startJourney, downloadCueSheet,
   get photoTileset() { return photoTileset; },
+  // Dial minimap brightness live in devtools instead of edit-build-reload:
+  //   __DEBUG__.setMinimapBrightness(1.8)
+  // Once it looks right, put that number in MINIMAP_BRIGHTNESS so it sticks.
+  setMinimapBrightness(v) {
+    if (!window.__miniLayer) return "no minimap basemap layer — check __miniProbe";
+    // Multiply the stored baseline, never the live value: back-computing the
+    // baseline from the current brightness compounds on every repeat call.
+    window.__miniLayer.brightness = window.__miniBaseBrightness * v;
+    return `minimap brightness ${window.__miniLayer.brightness.toFixed(2)} (multiplier ${v})`;
+  },
 };
 
 // Quietly warms the browser image cache for every photo-memory asset so the
