@@ -185,15 +185,17 @@ async function setupMinimapImagery() {
 async function setupTerrainAndBuildings() {
   if (USE_PHOTOREALISTIC_TILES) {
     try {
-      const tileset = await Promise.resolve(Cesium.createGooglePhotorealistic3DTileset({
-        key: GOOGLE_MAPS_API_KEY,           // <-- Add this explicitly
-        maximumMemoryUsage: 2048,
-        maximumCachedBytes: 1073741824,
-        cullRequestsWhileMoving: true,
-        skipLevelOfDetail: true,
-        immediatelyLoadDesiredLevelOfDetail: true,
-        loadSiblings: false
-      }));
+      const tileset = await Promise.resolve(Cesium.createGooglePhotorealistic3DTileset(
+        GOOGLE_MAPS_API_KEY, // <-- 1st argument: The key string
+        {                    // <-- 2nd argument: The options object
+          maximumMemoryUsage: 2048,
+          maximumCachedBytes: 1073741824,
+          cullRequestsWhileMoving: true,
+          skipLevelOfDetail: true,
+          immediatelyLoadDesiredLevelOfDetail: true,
+          loadSiblings: false
+        }
+      ));
       mainViewer.scene.primitives.add(tileset);
       return;
     } catch (e) {
