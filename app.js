@@ -524,9 +524,6 @@ function overlayDurationScale() {
 let lastFrameMs = null;
 let lastLegId = null;
 let lastStateName = null;
-// Lookahead tile prefetch: keeps tiles loaded for the next ~10 minutes of playback
-let prefetchAheadSeconds = 600; // 10 minutes ahead
-let lastPrefetchTime = -999;
 let chapterTimer = null;
 // Suppresses the leg-transition block's automatic chapter-card display for
 // one upcoming transition — set right before (re)starting the journey so the
@@ -1029,32 +1026,6 @@ function render() {
   mainViewer.clock.currentTime = state.realTime;
   mainViewer.render();
   miniViewer.render();
-
-  // -- Lookahead tile prefetch --
-  // Every 30 seconds, peek 10 minutes ahead and render to load those tiles without pausing playback
-  if (playing && hasStartedOnce && simSeconds - lastPrefetchTime > 30) {
-    lastPrefetchTime = simSeconds;
-    const prefetchSim = Math.min(simSeconds + prefetchAheadSeconds, TOTAL_SIM);
-    const prefetchLeg = findLegAt(prefetchSim);
-    const prefetchLegFrac = prefetchLeg.simDuration > 0 ? R.clamp((prefetchSim - prefetchLeg.simStart) / prefetchLeg.simDuration, 0, 1) : 1;
-    const prefetchState = computeState(prefetchLeg, prefetchLegFrac);
-    if (prefetchState) {
-      const prefetchCam = mainViewer.camera;
-      const savedPos = prefetchCam.position.clone();
-      const savedDir = prefetchCam.direction.clone();
-      const savedUp = prefetchCam.up.clone();
-      // Quickly pan to lookahead position and render
-      prefetchCam.setView({
-        destination: prefetchState.pos,
-        orientation: { heading: R.toRadians(prefetchState.heading), pitch: R.toRadians(prefetchState.pitch), roll: 0 },
-      });
-      mainViewer.render();
-      // Restore camera immediately
-      prefetchCam.position = savedPos;
-      prefetchCam.direction = savedDir;
-      prefetchCam.up = savedUp;
-    }
-  }
 
   // -- HUD --
   const distSoFarM = LEGS.filter((l) => l.simEnd <= simSeconds).reduce((s, l) => s + (l._totalDist || 0), 0)
