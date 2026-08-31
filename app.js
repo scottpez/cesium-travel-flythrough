@@ -983,6 +983,7 @@ function render() {
       trailPositions.push(pos);
       if (trailPositions.length > TRAIL_MAX) trailPositions.shift();
       miniTrail.push(pos);
+      if (miniTrail.length > TRAIL_MAX) miniTrail.shift();
     }
   } else {
     mainVehicle.show = false;
