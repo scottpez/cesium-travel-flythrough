@@ -3,13 +3,13 @@
 //
 // 1. Get a fresh token at https://ion.cesium.com/tokens (the one below is old
 //    and may be rate-limited or revoked). Scope it to `assets:read` +
-//    `geocode`, and restrict it to your domain (scottpez.tech) once deployed.
+//    `geocode`, and restrict it to your domain (demo.scottpez.tech) once deployed.
 // 2. Google Photorealistic 3D Tiles requires that token to have Google Geocoder
 //    / Photorealistic Tiles access enabled on ion.cesium.com.
 // ============================================================================
 
 // ✅ Correct (Plain strings)
-export const ION_ACCESS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6ImNGVGJUTVVVZ0VsMy1LcmIiLCJqdGkiOiI3MjYzOGZhYi1lY2MyLTQyYTItODhjZC0wMDY2MzlhMTM1NGMiLCJpZCI6MjM2OTQ3LCJzdWIiOiJzY29wZXoiLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoic2NvdHRwZXotdHJhdmVsLWFwcCIsImlhdCI6MTc4ODE5Njk3N30.fFKNranOk_FHlemAPw2lsT6RBSPtKNX6cboj6vMt_lc";
+export const ION_ACCESS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6InZpekd6NFZVZlpGcmpIWFgiLCJqdGkiOiJiNTkwMTI4NS01OWY0LTQ5OTQtYWI4NS03Njk3NTg0ZGUyNjYiLCJpZCI6MjM2OTQ3LCJzdWIiOiJzY29wZXoiLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoic2NvdHRwZXotdHJhdmVsLWFwcCIsImlhdCI6MTc4ODIwNzMxOH0.URbCxu_J4bTQBvOP_FQULu66SKFO1lXKNDWompsMAns";
 export const GOOGLE_MAPS_API_KEY = "AIzaSyD5RYAIHh7WaIZWHSvXV4tU77LVcoab7aU";
 
 // Google Photorealistic 3D Tiles: real photogrammetry (actual textured

@@ -44,15 +44,30 @@ window.addEventListener("unhandledrejection", (e) => {
 // Non-fatal, auto-dismissing notice — for things that aren't errors but are
 // worth knowing, like "photorealistic tiles didn't load, fell back to OSM
 // Buildings" — so which renderer is actually active is never a guessing game.
-function showNotice(msg) {
+// Notices stack downward instead of all sitting at the same fixed offset.
+// Previously every notice was pinned to top:14px, so two failures in the same
+// boot (terrain AND imagery, which share a cause) drew exactly on top of each
+// other and only the last one was ever readable — which made a two-asset
+// outage look like a one-asset outage.
+let noticeCount = 0;
+function showNotice(msg, err) {
+  const slot = noticeCount++;
   const el = document.createElement("div");
   el.style.cssText =
-    "position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:99998;background:#78350f;color:#fff;" +
+    `position:fixed;top:${14 + slot * 58}px;left:50%;transform:translateX(-50%);z-index:99998;background:#78350f;color:#fff;` +
     "padding:10px 18px;border-radius:10px;font-family:'JetBrains Mono',monospace;font-size:12px;" +
     "border:1px solid #f59e0b;box-shadow:0 8px 24px rgba(0,0,0,0.5);max-width:80vw;text-align:center;";
-  el.textContent = `ℹ ${msg}`;
+  // Carry the underlying error text when there is one. A notice saying only
+  // "unavailable" can't distinguish an expired token from a bad scope from a
+  // network failure — the status code in the real message is the whole answer.
+  const detail = err ? `\n${err.message || err}` : "";
+  el.textContent = `ℹ ${msg}${detail}`;
+  el.style.whiteSpace = "pre-wrap";
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 9000);
+  setTimeout(() => {
+    el.remove();
+    noticeCount--;
+  }, 9000);
 }
 
 // ---------------------------------------------------------------- DOM refs
@@ -206,13 +221,13 @@ async function setupTerrainAndBuildings() {
     mainViewer.terrainProvider = await Cesium.createWorldTerrainAsync();
   } catch (e) {
     console.warn("World terrain unavailable, using flat ellipsoid.", e);
-    showNotice("Cesium World Terrain unavailable — gaps in photorealistic coverage will render flat.");
+    showNotice("Cesium World Terrain unavailable — gaps in photorealistic coverage will render flat.", e);
   }
   try {
     mainViewer.imageryLayers.addImageryProvider(await Cesium.createWorldImageryAsync());
   } catch (e) {
     console.warn("World imagery unavailable, globe will be untextured.", e);
-    showNotice("World imagery unavailable — gaps in photorealistic coverage will render untextured.");
+    showNotice("World imagery unavailable — gaps in photorealistic coverage will render untextured.", e);
   }
 
   if (!USE_PHOTOREALISTIC_TILES) return;
@@ -237,7 +252,7 @@ async function setupTerrainAndBuildings() {
     photoTileset = tileset;
   } catch (e) {
     console.warn("Photorealistic 3D Tiles unavailable, falling back to World Terrain.", e);
-    showNotice("Photorealistic 3D Tiles unavailable (check your API key/scopes) — using World Terrain instead.");
+    showNotice("Photorealistic 3D Tiles unavailable (check your API key/scopes) — using World Terrain instead.", e);
   }
 }
 
