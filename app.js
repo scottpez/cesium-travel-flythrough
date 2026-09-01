@@ -213,8 +213,8 @@ miniViewer.scene.screenSpaceCameraController.enableInputs = false;
 // must hold up at 35km, not just at trip scale.
 // One knob for overall minimap basemap brightness, applied on top of each
 // candidate's own tuned baseline below. The candidates start at very
-// different exposures — Carto's dark style is already dark by design, Esri's
-// satellite imagery is bright and gets pulled down hard — so a single
+// different exposures — the dark canvas basemap is already dark by design,
+// while satellite imagery is bright and gets pulled down hard — so a single
 // absolute brightness value can't serve all of them. Scaling their baselines
 // keeps their relative look intact while letting one number lift the lot.
 // 1.0 = each candidate's own baseline. Raise to lighten.
@@ -247,18 +247,22 @@ const BASEMAP_SOURCES = {
       maximumLevel: 19,
     }),
   },
-  "carto-dark": {
-    // Free, no key, CORS-enabled, and already the dark cartographic style the
-    // seatback minimap wants — so it needs far less brightness knocked out of
-    // it than a satellite basemap does. A poor match under photogrammetry
-    // though: a cartographic map beside real aerial imagery reads as a seam.
-    probe: "https://basemaps.cartocdn.com/dark_all/4/8/6.png",
+  "esri-dark-gray": {
+    // Dark grey cartographic canvas — landmasses, coastlines and muted
+    // labels, which is exactly the stylized seatback look the minimap wants,
+    // and it needs no key. Replaces CARTO's dark_all, which now requires an
+    // API key: CARTO still answers unkeyed requests with HTTP 200 and a
+    // valid PNG, but the PNG itself says "API key required". The probe below
+    // checks status codes, so it passed that source cleanly while the map
+    // rendered as an error notice. Any source added here must be genuinely
+    // keyless, not merely returning 200.
+    probe: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/4/6/8",
     miniStyle: { brightness: 1.0, contrast: 1.1, saturation: 0.8 },
     globeStyle: { brightness: 1.2, contrast: 1.0, saturation: 0.55, gamma: 1.1, hue: 0.0 },
     create: () => new Cesium.UrlTemplateImageryProvider({
-      url: "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-      credit: new Cesium.Credit("© OpenStreetMap contributors © CARTO"),
-      maximumLevel: 18,
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+      credit: new Cesium.Credit("Esri, HERE, Garmin, © OpenStreetMap contributors"),
+      maximumLevel: 16,
     }),
   },
   "openstreetmap": {
@@ -273,10 +277,12 @@ const BASEMAP_SOURCES = {
 };
 
 // Preference order differs by consumer. The globe wants satellite first so
-// gaps blend into the surrounding photogrammetry; the minimap wants the
-// stylized dark cartography first.
-const GLOBE_BASEMAP_ORDER = ["esri-world-imagery", "carto-dark", "openstreetmap"];
-const MINIMAP_BASEMAP_ORDER = ["carto-dark", "esri-world-imagery", "openstreetmap"];
+// gaps blend into the surrounding photogrammetry; a cartographic basemap
+// beside real aerial imagery reads as an obvious seam, which is why the dark
+// canvas is deliberately absent from the globe's list.
+const GLOBE_BASEMAP_ORDER = ["esri-world-imagery", "openstreetmap"];
+// The minimap wants the stylized dark cartography first.
+const MINIMAP_BASEMAP_ORDER = ["esri-dark-gray", "esri-world-imagery", "openstreetmap"];
 
 // Fetch one tile the way Cesium would. Resolves to a short status string
 // rather than throwing, so one dead host can't abort the whole probe.
