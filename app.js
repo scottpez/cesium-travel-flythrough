@@ -1440,7 +1440,11 @@ function render() {
   }
 
   // -- cameras --
-  if (!warmingUp) {
+  // flyingToStart suppresses this the same way warmingUp does: Cesium's camera
+  // flight drives the camera itself from inside scene.render(), so a per-frame
+  // lookAt() here would overwrite each tween step and the flight would look
+  // like a hard cut.
+  if (!warmingUp && !flyingToStart) {
     if (hasStartedOnce) {
       updateMainCamera(state, leg);
     } else {
@@ -1789,6 +1793,84 @@ const START_HOLD_MS = 10000;
 // being ignored for ten seconds.
 let holdingAtStart = false;
 
+// ---- ?autostart intro sequence -------------------------------------------
+// Title card over the orbiting world view, then a descent to the opening
+// shot, then the tile hold, then drive. Hands-off, so a recording can be
+// started and left alone, and every take opens identically.
+const INTRO_TITLE_MS = 10000; // ?intro=N
+const INTRO_FLY_MS = 5000;    // ?flyto=N
+let flyingToStart = false;
+
+// Fly from wherever the idle camera is down to the exact pose the chase
+// camera will hold at the start of leg 1.
+//
+// The destination has to be derived rather than guessed: updateMainCamera()
+// positions via lookAt(target, HeadingPitchRange), so the only reliable way
+// to know where that lands is to put the camera there and read it back. Note
+// the lookAtTransform(IDENTITY) calls — lookAt() leaves the camera in a
+// target-relative reference frame, and both `positionWC` reads and flyTo()
+// itself need it cleared or they operate in the wrong frame.
+async function flyToStartShot(durationMs) {
+  const leg = LEGS[0];
+  const state = computeState(leg, 0);
+
+  mainViewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+  const fromPos = Cesium.Cartesian3.clone(mainViewer.camera.positionWC, new Cesium.Cartesian3());
+  const fromOrientation = {
+    heading: mainViewer.camera.heading,
+    pitch: mainViewer.camera.pitch,
+    roll: mainViewer.camera.roll,
+  };
+
+  updateMainCamera(state, leg); // lands the camera on the opening chase shot
+  mainViewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+  const toPos = Cesium.Cartesian3.clone(mainViewer.camera.positionWC, new Cesium.Cartesian3());
+  const toOrientation = {
+    heading: mainViewer.camera.heading,
+    pitch: mainViewer.camera.pitch,
+    roll: mainViewer.camera.roll,
+  };
+
+  // Put it back where it was, then animate across.
+  mainViewer.camera.setView({ destination: fromPos, orientation: fromOrientation });
+
+  flyingToStart = true;
+  await new Promise((resolve) => {
+    mainViewer.camera.flyTo({
+      destination: toPos,
+      orientation: toOrientation,
+      duration: durationMs / 1000,
+      complete: resolve,
+      cancel: resolve,
+    });
+  });
+  flyingToStart = false;
+
+  // The chase camera smooths its heading between frames. Clear that state so
+  // the first real frame snaps to the true travel heading rather than easing
+  // in from whatever the descent ended on.
+  smoothedHeadingRad = null;
+  lastChaseLegId = null;
+}
+
+async function runIntroSequence() {
+  const qs = new URLSearchParams(location.search);
+  const titleMs = qs.has("intro") ? parseFloat(qs.get("intro")) * 1000 : INTRO_TITLE_MS;
+  const flyMs = qs.has("flyto") ? parseFloat(qs.get("flyto")) * 1000 : INTRO_FLY_MS;
+
+  // Phase 1 — title card over the world. hasStartedOnce is still false, so
+  // render() keeps driving updateIdleCamera() and the bookend stays up.
+  if (titleMs > 0) await new Promise((r) => setTimeout(r, titleMs));
+
+  // Phase 2 — drop the title and descend to the opening shot.
+  el.bookend.classList.add("hidden");
+  hasStartedOnce = true; // so the post-flight frames use the chase camera
+  if (flyMs > 0) await flyToStartShot(flyMs);
+
+  // Phases 3 and 4 — tile hold on the opening shot, then drive.
+  await startJourney();
+}
+
 async function startJourney() {
   hasStartedOnce = true;
   // playing stays FALSE through the hold: the render loop keeps running, so
@@ -1897,6 +1979,10 @@ function preloadPhotoMemories() {
     if (qs.has("record")) setSpeedDialValue(RECORD_SPEED_DIAL_VALUE);
     if (qs.has("fast")) playbackMultiplier = parseFloat(qs.get("fast")) || playbackMultiplier;
 
+    // ?intro=N  seconds the title card holds over the orbiting world view
+    //           before the descent begins (?autostart only, default 10)
+    // ?flyto=N  seconds for the descent from world view to the opening shot
+    //           (?autostart only, default 5; 0 makes it a hard cut)
     // ?hold=N sets how many seconds the journey sits on the opening shot,
     // letting photogrammetry around and ahead of the start position resolve
     // before the clock starts. Default 10; ?hold=0 disables it. Applies to
@@ -1909,7 +1995,10 @@ function preloadPhotoMemories() {
       await warmUpTiles();
     }
     if (shouldAutostart) {
-      startJourney();
+      // Not startJourney() directly — ?autostart runs the full hands-off
+      // intro: title card over the world view, descent to the opening shot,
+      // tile hold, then drive. Tune with ?intro=N and ?flyto=N.
+      runIntroSequence();
     }
   } catch (err) {
     showFatalError(`boot() threw — nothing will render.\n${err.stack || err}`);
