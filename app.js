@@ -220,42 +220,63 @@ miniViewer.scene.screenSpaceCameraController.enableInputs = false;
 // 1.0 = each candidate's own baseline. Raise to lighten.
 const MINIMAP_BRIGHTNESS = 2.5;
 
-const MINIMAP_BASEMAPS = [
-  {
-    name: "carto-dark",
-    // Free, no key, CORS-enabled, and already the dark cartographic style
-    // this seatback map wants — so it needs far less brightness knocked out
-    // of it than a satellite basemap does.
-    probe: "https://basemaps.cartocdn.com/dark_all/4/8/6.png",
-    style: { brightness: 1.0, contrast: 1.1, saturation: 0.8 },
-    create: () => new Cesium.UrlTemplateImageryProvider({
-      url: "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-      credit: new Cesium.Credit("© OpenStreetMap contributors © CARTO"),
-      maximumLevel: 18,
-    }),
-  },
-  {
-    name: "esri-world-imagery",
-    // Satellite, no key. Note the {z}/{y}/{x} ordering — Esri's REST tile
+// Shared basemap catalogue, used by BOTH the minimap and the main globe's
+// gap-filling backdrop. Each entry carries a `probe`: a real tile URL fetched
+// before the source is used, because Cesium gives no usable signal when a
+// basemap fails — a provider constructs fine, its layer adds fine, and then
+// tile requests fail asynchronously and the globe silently paints baseColor,
+// which is indistinguishable from a working dark basemap. Fetching the same
+// URL Cesium would request, under the same CORS rules WebGL texturing needs,
+// is the only thing that answers the question directly.
+//
+// Two style baselines per source because the two consumers want opposite
+// things: the minimap is a stylized seatback graphic, while the main globe
+// has to sit beside Google photogrammetry without looking like a different
+// map stitched in.
+const BASEMAP_SOURCES = {
+  "esri-world-imagery": {
+    // Satellite, no key. Best match for the main globe since it has to blend
+    // with photogrammetry. Note the {z}/{y}/{x} ordering — Esri's REST tile
     // scheme puts row before column, unlike every other entry here.
     probe: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/4/6/8",
-    style: { brightness: 0.55, contrast: 1.2, saturation: 0.35 },
+    miniStyle: { brightness: 0.55, contrast: 1.2, saturation: 0.35 },
+    globeStyle: { brightness: 1.05, contrast: 1.0, saturation: 0.70, gamma: 1.10, hue: 0.0 },
     create: () => new Cesium.UrlTemplateImageryProvider({
       url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       credit: new Cesium.Credit("Esri, Maxar, Earthstar Geographics"),
       maximumLevel: 19,
     }),
   },
-  {
-    name: "openstreetmap",
-    // Raster map tiles only — NOT OSM Buildings. Last because OSM's tile
-    // usage policy actively blocks bulk and non-browser-looking clients, so
-    // it is the likeliest of these to hard-fail.
+  "carto-dark": {
+    // Free, no key, CORS-enabled, and already the dark cartographic style the
+    // seatback minimap wants — so it needs far less brightness knocked out of
+    // it than a satellite basemap does. A poor match under photogrammetry
+    // though: a cartographic map beside real aerial imagery reads as a seam.
+    probe: "https://basemaps.cartocdn.com/dark_all/4/8/6.png",
+    miniStyle: { brightness: 1.0, contrast: 1.1, saturation: 0.8 },
+    globeStyle: { brightness: 1.2, contrast: 1.0, saturation: 0.55, gamma: 1.1, hue: 0.0 },
+    create: () => new Cesium.UrlTemplateImageryProvider({
+      url: "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+      credit: new Cesium.Credit("© OpenStreetMap contributors © CARTO"),
+      maximumLevel: 18,
+    }),
+  },
+  "openstreetmap": {
+    // Raster map tiles only — NOT OSM Buildings. Last everywhere because
+    // OSM's tile usage policy actively blocks bulk and non-browser-looking
+    // clients, so it is the likeliest of these to hard-fail.
     probe: "https://tile.openstreetmap.org/4/8/6.png",
-    style: { brightness: 0.6, contrast: 1.2, saturation: 0.3 },
+    miniStyle: { brightness: 0.6, contrast: 1.2, saturation: 0.3 },
+    globeStyle: { brightness: 1.1, contrast: 1.0, saturation: 0.5, gamma: 1.1, hue: 0.0 },
     create: () => new Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" }),
   },
-];
+};
+
+// Preference order differs by consumer. The globe wants satellite first so
+// gaps blend into the surrounding photogrammetry; the minimap wants the
+// stylized dark cartography first.
+const GLOBE_BASEMAP_ORDER = ["esri-world-imagery", "carto-dark", "openstreetmap"];
+const MINIMAP_BASEMAP_ORDER = ["carto-dark", "esri-world-imagery", "openstreetmap"];
 
 // Fetch one tile the way Cesium would. Resolves to a short status string
 // rather than throwing, so one dead host can't abort the whole probe.
@@ -274,12 +295,34 @@ async function probeTile(url, timeoutMs = 6000) {
   }
 }
 
+// Probe results are cached per URL: the minimap and the globe draw from the
+// same catalogue, and probing each host twice on every boot would double the
+// startup latency for no new information.
+const probeCache = new Map();
+function probeTileCached(url) {
+  if (!probeCache.has(url)) probeCache.set(url, probeTile(url));
+  return probeCache.get(url);
+}
+
+// Walk a preference order, probing each source, and return the first that
+// actually serves a tile. Returns { name, source, results } or null.
+async function pickBasemap(order) {
+  const results = [];
+  for (const name of order) {
+    const source = BASEMAP_SOURCES[name];
+    const r = await probeTileCached(source.probe);
+    results.push({ name, ok: r.ok, detail: r.detail });
+    if (r.ok) return { name, source, results };
+  }
+  return { name: null, source: null, results };
+}
+
 async function setupMinimapImagery() {
   miniViewer.imageryLayers.removeAll();
 
-  // Ion World Imagery first when the token actually works — it's the sharpest
-  // option and needs no third-party host. Unlike the candidates below this
-  // one does reject on failure, so a try/catch is sufficient here.
+  // Ion World Imagery first when the token actually works — sharpest option,
+  // no third-party host. Unlike the probed sources this one rejects on
+  // failure, so a try/catch is sufficient.
   try {
     const provider = await Cesium.createWorldImageryAsync();
     const layer = miniViewer.imageryLayers.addImageryProvider(provider);
@@ -294,32 +337,27 @@ async function setupMinimapImagery() {
     console.warn("Ion World Imagery unavailable for minimap, probing no-auth basemaps.", e);
   }
 
-  const results = [];
-  for (const cand of MINIMAP_BASEMAPS) {
-    const r = await probeTile(cand.probe);
-    results.push({ name: cand.name, ok: r.ok, detail: r.detail });
-    if (!r.ok) continue;
+  const { name, source, results } = await pickBasemap(MINIMAP_BASEMAP_ORDER);
+  window.__miniProbe = results;
+  window.__miniSource = name;
 
-    const layer = miniViewer.imageryLayers.addImageryProvider(cand.create());
-    window.__miniBaseBrightness = cand.style.brightness;
-    layer.brightness = cand.style.brightness * MINIMAP_BRIGHTNESS;
-    layer.contrast = cand.style.contrast;
-    layer.saturation = cand.style.saturation;
-    window.__miniLayer = layer;
-    window.__miniSource = cand.name;
-    window.__miniProbe = results;
-    console.info(`Minimap basemap: ${cand.name}`, results);
+  if (!source) {
+    // Say so loudly and say WHY for each source — a silent return here is
+    // what made this look like a rendering bug for three rounds of debugging
+    // rather than a network one.
+    const summary = results.map((r) => `${r.name}: ${r.detail}`).join(" · ");
+    console.error("No minimap basemap reachable.", results);
+    showNotice(`Minimap basemap unreachable — every source failed. ${summary}`);
     return;
   }
 
-  // Every candidate failed. Say so loudly and say WHY for each one — a silent
-  // return here is what made this look like a rendering bug for three rounds
-  // of debugging rather than a network one.
-  window.__miniProbe = results;
-  window.__miniSource = null;
-  const summary = results.map((r) => `${r.name}: ${r.detail}`).join(" · ");
-  console.error("No minimap basemap reachable.", results);
-  showNotice(`Minimap basemap unreachable — every source failed. ${summary}`);
+  const layer = miniViewer.imageryLayers.addImageryProvider(source.create());
+  window.__miniBaseBrightness = source.miniStyle.brightness;
+  layer.brightness = source.miniStyle.brightness * MINIMAP_BRIGHTNESS;
+  layer.contrast = source.miniStyle.contrast;
+  layer.saturation = source.miniStyle.saturation;
+  window.__miniLayer = layer;
+  console.info(`Minimap basemap: ${name}`, results);
 }
 
 // Set once the photorealistic tileset loads; stays null if it's unavailable
@@ -335,18 +373,92 @@ let photoTileset = null;
 // the floor the photorealistic tiles sit on top of. Where Google has
 // coverage you never see it; where it doesn't, the gap degrades to real
 // terrain under satellite imagery instead of to nothing.
+// Whether the gap-filling globe uses real 3D terrain or stays a flat
+// ellipsoid at sea level.
+//
+// FALSE (flat) is the default, and it is what fixes the blotchiness. Cesium
+// World Terrain and Google's photogrammetry are two independent measurements
+// of the same ground and disagree by several metres. Wherever World Terrain
+// happens to sit higher, the globe surface pushes up THROUGH the photorealistic
+// tiles in irregular patches — satellite imagery erupting through the middle
+// of a city. That is a geometric intersection, not a shading artifact, so no
+// amount of colour matching touches it.
+//
+// A flat ellipsoid sits at sea level, which is below the photogrammetry
+// essentially everywhere on land, so it can never poke through. Coverage gaps
+// still get filled, just with flat imagery instead of 3D terrain — and the
+// ocean, which is the longest gap on this route, is at sea level anyway so it
+// loses nothing. It also stops terrain tile requests competing with the
+// photorealistic tiles for bandwidth.
+//
+// Set true to get 3D terrain back in gaps, at the cost of the blotching
+// wherever the two surfaces overlap.
+const GLOBE_USES_3D_TERRAIN = false;
+
+// Colour match for the gap-filling imagery. Satellite basemaps are more
+// saturated and cooler than Google's photogrammetry, so an untuned globe
+// reads as a visibly different map stitched in beside the tiles. Tune live
+// with __DEBUG__.setBaseImageryStyle({...}), then paste the result here.
+// Live-tunable style for the gap-filling imagery. Initialised from whichever
+// source wins the probe (each carries its own baseline, since satellite and
+// cartographic basemaps need very different treatment to sit beside
+// photogrammetry). Tune with __DEBUG__.setBaseImageryStyle({...}), then paste
+// the result into that source's globeStyle so it sticks.
+const BASE_IMAGERY_STYLE = {
+  brightness: 1.05,
+  saturation: 0.70, // pull toward the photogrammetry's more muted palette
+  gamma: 1.10,
+  hue: 0.0,
+  contrast: 1.0,
+};
+
+function applyBaseImageryStyle(layer, style) {
+  layer.brightness = style.brightness;
+  layer.saturation = style.saturation;
+  layer.gamma = style.gamma;
+  layer.hue = style.hue;
+  layer.contrast = style.contrast;
+}
+
 async function setupTerrainAndBuildings() {
-  try {
-    mainViewer.terrainProvider = await Cesium.createWorldTerrainAsync();
-  } catch (e) {
-    console.warn("World terrain unavailable, using flat ellipsoid.", e);
-    showNotice("Cesium World Terrain unavailable — gaps in photorealistic coverage will render flat.", e);
+  if (GLOBE_USES_3D_TERRAIN) {
+    try {
+      mainViewer.terrainProvider = await Cesium.createWorldTerrainAsync();
+    } catch (e) {
+      console.warn("World terrain unavailable, using flat ellipsoid.", e);
+      showNotice("Cesium World Terrain unavailable — gaps in photorealistic coverage will render flat.", e);
+    }
   }
+
+  // Gap-filling backdrop. Ion World Imagery when the token works, otherwise
+  // fall through to the same probed no-auth sources the minimap uses — so a
+  // dead or invalid Ion token degrades the look slightly instead of leaving
+  // coverage gaps as untextured globe.baseColor.
+  let baseLayer = null;
+  let baseSource = null;
   try {
-    mainViewer.imageryLayers.addImageryProvider(await Cesium.createWorldImageryAsync());
+    baseLayer = mainViewer.imageryLayers.addImageryProvider(await Cesium.createWorldImageryAsync());
+    baseSource = "ion-world-imagery";
+    window.__baseProbe = [{ name: "ion-world-imagery", ok: true, detail: "asset 2 OK" }];
   } catch (e) {
-    console.warn("World imagery unavailable, globe will be untextured.", e);
-    showNotice("World imagery unavailable — gaps in photorealistic coverage will render untextured.", e);
+    console.warn("Ion World Imagery unavailable for globe, probing no-auth basemaps.", e);
+    const { name, source, results } = await pickBasemap(GLOBE_BASEMAP_ORDER);
+    window.__baseProbe = results;
+    if (source) {
+      baseLayer = mainViewer.imageryLayers.addImageryProvider(source.create());
+      baseSource = name;
+      Object.assign(BASE_IMAGERY_STYLE, source.globeStyle);
+    } else {
+      const summary = results.map((r) => `${r.name}: ${r.detail}`).join(" · ");
+      console.error("No globe basemap reachable.", results);
+      showNotice(`Gaps in photorealistic coverage will render untextured — every basemap failed. ${summary}`);
+    }
+  }
+  if (baseLayer) {
+    applyBaseImageryStyle(baseLayer, BASE_IMAGERY_STYLE);
+    window.__baseLayer = baseLayer;
+    window.__baseSource = baseSource;
+    console.info(`Globe backdrop: ${baseSource}`);
   }
 
   if (!USE_PHOTOREALISTIC_TILES) return;
@@ -359,8 +471,17 @@ async function setupTerrainAndBuildings() {
         // from Cesium3DTileset (it survives only on PointCloudShading), and
         // the latter has never been an option. These two are the real names,
         // both in bytes; the hard ceiling is their sum.
-        cacheBytes: 1073741824,               // 1 GB steady state
-        maximumCacheOverflowBytes: 268435456, // + 256 MB headroom for one view
+        // Memory ceiling, deliberately conservative. This was 1GB + 256MB,
+        // which is a 1.25GB working set of decoded photogrammetry inside a
+        // single renderer process that is ALSO holding the V8 heap, two
+        // scene graphs and a TAA history buffer. Dense city coverage (NYC)
+        // on a low chase camera is where that budget actually gets claimed,
+        // and that is exactly where the tab died. Trading re-fetches for
+        // headroom is the right side of this trade for an unattended
+        // 30-minute recording: a re-fetch costs a blurry second, running out
+        // of memory costs the whole take.
+        cacheBytes: 402653184,                // 384 MB steady state
+        maximumCacheOverflowBytes: 134217728, // + 128 MB headroom (512 MB hard cap)
 
         // The tileset's OWN detail knob (default 16). scene.globe's
         // maximumScreenSpaceError has no effect here — different subsystem.
@@ -462,6 +583,21 @@ for (const leg of LEGS) {
   leg.simStart = cumSim;
   leg.simEnd = cumSim + leg.simDuration;
   cumSim += leg.simDuration;
+}
+
+// Exclusive prefix sum of leg distances: legDistancePrefix[i] is the total
+// distance of every leg BEFORE leg i. Built once here so the HUD's
+// distance-travelled readout is an array index per frame rather than a
+// filter + reduce over the whole itinerary. `_index` is cached for the same
+// reason — LEGS.indexOf() in the render loop is a linear scan per frame.
+const legDistancePrefix = [];
+{
+  let running = 0;
+  for (let i = 0; i < LEGS.length; i++) {
+    LEGS[i]._index = i;
+    legDistancePrefix.push(running);
+    running += LEGS[i]._totalDist || 0;
+  }
 }
 const TOTAL_SIM = cumSim;
 const TRIP_START_JD = LEGS[0].realStart;
@@ -624,10 +760,41 @@ function findLegAt(simSeconds) {
 
 // ============================================================ ENTITIES ===
 let currentVehicleKey = null;
+// Entity properties are PROPERTY SLOTS, not plain fields. Assigning a raw
+// Cartesian3 to `entity.position` makes Cesium construct a brand-new
+// ConstantPositionProperty to wrap it and raise definitionChanged, which
+// walks every listener on EntityCollection and DataSourceDisplay. Doing that
+// once per frame is ~5 property objects plus 5 event raises per frame; across
+// a 30-minute recording at 60fps that is over half a million throwaway
+// objects arriving as a steady stream — precisely the allocation pattern a
+// generational GC handles worst, and it ratchets the heap upward instead of
+// sawtoothing flat.
+//
+// Holding the properties and calling setValue() mutates them in place: no new
+// wrapper, and definitionChanged only fires when the value actually differs.
+// Combined with the scratch Cartesians below (every Cesium math function takes
+// a `result` out-parameter) the per-frame allocation here drops to zero.
+const vehiclePosition = new Cesium.ConstantPositionProperty(
+  Cesium.Cartesian3.fromDegrees(LEGS[0].waypoints[0][0], LEGS[0].waypoints[0][1], 0)
+);
+const vehicleAlignedAxis = new Cesium.ConstantProperty(Cesium.Cartesian3.UNIT_Z);
+const markerPosition = new Cesium.ConstantPositionProperty(
+  Cesium.Cartesian3.fromDegrees(LEGS[0].waypoints[0][0], LEGS[0].waypoints[0][1], 0)
+);
+const scratchPos = new Cesium.Cartesian3();
+const scratchAhead = new Cesium.Cartesian3();
+const scratchDiff = new Cesium.Cartesian3();
+const scratchAxis = new Cesium.Cartesian3();
+const scratchMarker = new Cesium.Cartesian3();
+
 const mainVehicle = mainViewer.entities.add({
-  position: Cesium.Cartesian3.fromDegrees(LEGS[0].waypoints[0][0], LEGS[0].waypoints[0][1], 0),
+  position: vehiclePosition,
   billboard: {
     image: VEHICLE_DEFS.van.icon,
+    alignedAxis: vehicleAlignedAxis,
+    // Constant for the life of the app — it was being reassigned every frame
+    // purely out of habit. See the note above on why that is not free.
+    heightReference: Cesium.HeightReference.NONE,
     width: VEHICLE_DEFS.van.width,
     height: VEHICLE_DEFS.van.height,
     verticalOrigin: Cesium.VerticalOrigin.CENTER,
@@ -637,7 +804,7 @@ const mainVehicle = mainViewer.entities.add({
   },
 });
 const miniMarker = miniViewer.entities.add({
-  position: Cesium.Cartesian3.fromDegrees(LEGS[0].waypoints[0][0], LEGS[0].waypoints[0][1], 0),
+  position: markerPosition,
   point: { pixelSize: 10, color: Cesium.Color.fromCssColorString("#38bdf8"), outlineColor: Cesium.Color.WHITE, outlineWidth: 2, disableDepthTestDistance: Number.POSITIVE_INFINITY },
 });
 
@@ -689,11 +856,30 @@ function pointInRing(lon, lat, ring) {
   }
   return inside;
 }
+// Bounding boxes, computed once per feature on first use. A full ray-cast
+// against a multi-thousand-vertex state outline costs far more than four
+// float comparisons, and for all but one state the box rejects immediately.
+function featureBBox(f) {
+  if (f._bbox) return f._bbox;
+  const ring = f.geometry.coordinates[0];
+  let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  for (let i = 0; i < ring.length; i++) {
+    const lon = ring[i][0], lat = ring[i][1];
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  }
+  f._bbox = { minLon, maxLon, minLat, maxLat };
+  return f._bbox;
+}
+
 function findStateName(lon, lat) {
   if (!statesGeo) return null;
   for (const f of statesGeo.features) {
-    const rings = f.geometry.coordinates;
-    if (pointInRing(lon, lat, rings[0])) return f.properties.name;
+    const b = featureBBox(f);
+    if (lon < b.minLon || lon > b.maxLon || lat < b.minLat || lat > b.maxLat) continue;
+    if (pointInRing(lon, lat, f.geometry.coordinates[0])) return f.properties.name;
   }
   return null;
 }
@@ -725,6 +911,22 @@ function overlayDurationScale() {
 let lastFrameMs = null;
 let lastLegId = null;
 let lastStateName = null;
+// ~4x/second at 60fps. Fast enough that a border crossing still reads as
+// instant, cheap enough that the polygon test stops being a hot path.
+const STATE_CHECK_INTERVAL_FRAMES = 15;
+let stateCheckCounter = 0;
+// Minimap renders every Nth frame (see the render call for why).
+const MINI_RENDER_EVERY_N_FRAMES = 3;
+let miniFrameCounter = 0;
+// Rolling tile release. Cesium only trims the tile cache when it needs room
+// for the current view, so on a one-way route the cache drifts up to its
+// ceiling and stays pinned there, holding ground that is now hundreds of
+// miles behind us. Trimming on a timer turns that into the moving window this
+// route actually wants: load what's ahead through the normal frustum, drop
+// what's behind on a schedule. Leg boundaries alone were too coarse — the
+// NYC-to-Stroudsburg drive is a single long leg.
+const TILE_TRIM_INTERVAL_SIM_SEC = 4;
+let lastTileTrimSim = -Infinity;
 let chapterTimer = null;
 // Suppresses the leg-transition block's automatic chapter-card display for
 // one upcoming transition — set right before (re)starting the journey so the
@@ -1090,7 +1292,9 @@ function updateMiniCamera(state) {
     destination: Cesium.Cartesian3.fromDegrees(miniLon, miniLat, miniHeight),
     orientation: { heading: 0, pitch: R.toRadians(-90), roll: 0 },
   });
-  miniMarker.position = Cesium.Cartesian3.fromDegrees(state.lon, state.lat, state.height + 500);
+  markerPosition.setValue(
+    Cesium.Cartesian3.fromDegrees(state.lon, state.lat, state.height + 500, undefined, scratchMarker)
+  );
 }
 
 // idle establishing shot before playback starts
@@ -1141,6 +1345,13 @@ function render() {
     // fixed, and there's no coverage API worth polling 60 times a second to
     // rediscover something the itinerary can simply state.
     mainViewer.scene.globe.show = !(photoTileset && leg.hideGlobe);
+    // Force the tile cache back down to cacheBytes at every leg boundary.
+    // Cesium only trims when it needs room, so on a continuous one-way route
+    // the cache sits pinned at its ceiling holding cities we will never fly
+    // over again. A leg change is the one moment we know the previous
+    // region is behind us for good. Unloads happen on the next frame, inside
+    // the render loop, so the WebGL deletes stay on the right thread.
+    if (photoTileset) photoTileset.trimLoadedTiles();
     if (leg.celebration && hasStartedOnce) {
       clearTimeout(leg._celebScheduled);
       leg._celebScheduled = setTimeout(() => triggerCelebration(leg.celebration), leg.celebration.delay || 0);
@@ -1175,9 +1386,11 @@ function render() {
     // what you'd see if it were silently clamping to sea level while the
     // camera looks at the baked ~80m target far above it. Using the same
     // baked height for both keeps them always looking at the same point.
-    const pos = Cesium.Cartesian3.fromDegrees(state.lon, state.lat, state.height);
-    mainVehicle.billboard.heightReference = Cesium.HeightReference.NONE;
-    mainVehicle.position = pos;
+    // setValue() into the held property instead of `mainVehicle.position = …`,
+    // and into a reused scratch Cartesian instead of a fresh one. See the note
+    // at the entity definitions. heightReference is set once, at definition.
+    const pos = Cesium.Cartesian3.fromDegrees(state.lon, state.lat, state.height, undefined, scratchPos);
+    vehiclePosition.setValue(pos);
 
     // Orient the plan-view icon along the direction of travel: take a point
     // a short distance ahead (in the already-known heading direction) and
@@ -1187,27 +1400,40 @@ function render() {
     const eps2 = 0.0006;
     const aheadLon = state.lon + (Math.sin(state.heading) * eps2) / Math.max(Math.cos(R.toRadians(state.lat)), 0.05);
     const aheadLat = state.lat + Math.cos(state.heading) * eps2;
-    const posAhead = Cesium.Cartesian3.fromDegrees(aheadLon, aheadLat, state.height);
-    const diff = Cesium.Cartesian3.subtract(posAhead, pos, new Cesium.Cartesian3());
+    const posAhead = Cesium.Cartesian3.fromDegrees(aheadLon, aheadLat, state.height, undefined, scratchAhead);
+    const diff = Cesium.Cartesian3.subtract(posAhead, pos, scratchDiff);
     const diffLen = Cesium.Cartesian3.magnitude(diff);
     window.__lastAlignedAxisDiffLen = diffLen; // debug-panel visibility into whether this ever degenerates
-    mainVehicle.billboard.alignedAxis = diffLen > 1e-6
-      ? Cesium.Cartesian3.normalize(diff, new Cesium.Cartesian3())
-      : Cesium.Cartesian3.UNIT_Z; // degenerate direction — skip rather than risk NaN
+    vehicleAlignedAxis.setValue(diffLen > 1e-6
+      ? Cesium.Cartesian3.normalize(diff, scratchAxis)
+      : Cesium.Cartesian3.UNIT_Z); // degenerate direction — skip rather than risk NaN
 
     if (lastTrailPos === null || Cesium.Cartesian3.distance(pos, lastTrailPos) > TRAIL_MIN_STEP_M) {
-      lastTrailPos = pos;
-      trailPositions.push(pos);
-      if (trailPositions.length > TRAIL_MAX) trailPositions.shift();
-      miniTrail.push(pos);
-      if (miniTrail.length > TRAIL_MAX) miniTrail.shift();
+      // The trails must hold their OWN copies. `pos` is now a scratch object
+      // overwritten every frame, so storing the reference would collapse every
+      // trail point onto the live position and the trail would vanish.
+      // When a buffer is full, recycle the Cartesian being shifted off rather
+      // than allocating a replacement — a fixed-size ring, zero steady-state
+      // garbage, where before this allocated a Cartesian per point forever.
+      const slot = trailPositions.length >= TRAIL_MAX ? trailPositions.shift() : new Cesium.Cartesian3();
+      trailPositions.push(Cesium.Cartesian3.clone(pos, slot));
+      const miniSlot = miniTrail.length >= TRAIL_MAX ? miniTrail.shift() : new Cesium.Cartesian3();
+      miniTrail.push(Cesium.Cartesian3.clone(pos, miniSlot));
+      lastTrailPos = Cesium.Cartesian3.clone(pos, lastTrailPos || new Cesium.Cartesian3());
     }
   } else {
     mainVehicle.show = false;
   }
 
   // -- state boundary detection (US driving legs) --
-  if (statesGeo && !state.isStatic && leg.countryCode === "US") {
+  // Throttled: state borders do not move, and at driving speed the vehicle
+  // covers a few metres between frames, so testing 60 times a second buys
+  // nothing but CPU. This ran full point-in-polygon against every state
+  // outline on every frame of every US driving leg — which is exactly the
+  // leg type, and the part of the route, where the tab was dying.
+  stateCheckCounter++;
+  if (statesGeo && !state.isStatic && leg.countryCode === "US"
+      && stateCheckCounter % STATE_CHECK_INTERVAL_FRAMES === 0) {
     const name = findStateName(state.lon, state.lat);
     if (name && name !== lastStateName) { showStateLabel(name); lastStateName = name; visitedStates.add(name); }
     if (!name) lastStateName = null;
@@ -1236,12 +1462,29 @@ function render() {
   // maximally simple test billboard, tracking the exact live position of the (also
   // correctly-configured) real vehicle, still didn't render — ruling out every
   // billboard-specific property and pointing at the render call itself.
+  // Release ground we've already passed. Unloads are queued and executed on
+  // the next frame inside the render loop, so the WebGL deletes stay on the
+  // right thread — this is safe to call from here.
+  if (photoTileset && playing && simSeconds - lastTileTrimSim > TILE_TRIM_INTERVAL_SIM_SEC) {
+    lastTileTrimSim = simSeconds;
+    photoTileset.trimLoadedTiles();
+  }
+
   mainViewer.clock.currentTime = state.realTime;
   mainViewer.render();
-  miniViewer.render();
+  // The minimap is a second full scene render — its own globe, imagery tiles,
+  // entities and GPU work — and it eases toward its target at k=0.03, so it
+  // is very nearly static. Rendering it at a third of the main view's rate is
+  // visually indistinguishable and hands the main view back a large share of
+  // the frame budget and the tile pipeline.
+  miniFrameCounter++;
+  if (miniFrameCounter % MINI_RENDER_EVERY_N_FRAMES === 0) miniViewer.render();
 
   // -- HUD --
-  const distSoFarM = LEGS.filter((l) => l.simEnd <= simSeconds).reduce((s, l) => s + (l._totalDist || 0), 0)
+  // Prefix sum instead of filter().reduce(): the old form allocated a new
+  // array and rescanned all 13 legs on every one of the ~108,000 frames in a
+  // recording, to compute a number that only changes at leg boundaries.
+  const distSoFarM = legDistancePrefix[leg._index]
     + (leg._totalDist || 0) * state.frac;
   el.statDistance.textContent = Math.round(distSoFarM / 1609.34).toLocaleString();
   const elapsedRealSec = J.secondsDifference(state.realTime, TRIP_START_JD);
@@ -1304,6 +1547,16 @@ function render() {
       `vehicle h    ${state.height.toFixed(1)} m\n` +
       `cam actual h ${cam ? cam.height.toFixed(1) : "-"} m\n` +
       `range        ${lastCameraDebug.range ?? "-"} m\n` +
+      `--- memory ---\n` +
+      // performance.memory is Chrome-only and reports the V8 heap only — GPU
+      // and tile texture memory live outside it. Watch both: a flat heap with
+      // a climbing tile budget means the ceiling below is still too high.
+      `js heap      ${performance.memory
+        ? `${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)}/${(performance.memory.jsHeapSizeLimit / 1048576).toFixed(0)} MB`
+        : "n/a (non-Chrome)"}\n` +
+      `tile mem     ${photoTileset ? `${(photoTileset.totalMemoryUsageInBytes / 1048576).toFixed(0)} MB` : "-"}\n` +
+      `tiles loaded ${photoTileset?.statistics?.numberOfTilesTotal ?? "-"} pending=${photoTileset?.statistics?.numberOfPendingRequests ?? "-"}\n` +
+      `globe base   ${window.__baseSource ?? "NONE — gaps untextured"}\n` +
       `--- minimap ---\n` +
       `trail pts    ${miniTrail.length}\n` +
       `mini height  ${miniHeight?.toFixed(0) ?? "-"} m\n` +
@@ -1383,29 +1636,40 @@ async function warmUpTiles() {
   playing = false;
   el.btnWarmup.disabled = true;
 
-  const points = [];
-  for (const leg of LEGS) {
-    if (leg.waypoints) {
-      for (const [lon, lat] of leg.waypoints) points.push({ lon, lat, isFlight: leg.type === "flight" });
-    } else if (leg.position) {
-      points.push({ lon: leg.position[0], lat: leg.position[1], isFlight: false });
-    }
+  // Warm the OPENING SHOT ONLY, not the whole route.
+  //
+  // The full-route sweep was actively harmful once the tile cache got a real
+  // ceiling. It visited 466 waypoints, far more photogrammetry than the
+  // 512MB cap can hold, so everything loaded early was evicted before the
+  // sweep finished — the only tiles surviving to playback were from the END
+  // of the route, which is the last thing needed. It also sampled from
+  // straight overhead at 900m/6000m while playback watches obliquely from
+  // 475m at pitch -14°, a different frustum that asks for different tiles at
+  // a different LOD. And it performed a full allocate-and-evict churn of the
+  // entire cache immediately before a 30-minute recording began, leaving the
+  // heap and the GPU pool fragmented before the take even started.
+  //
+  // What a warmup can genuinely buy is a sharp first shot. So sample only the
+  // opening leg, and sample it through the REAL playback camera so the tiles
+  // fetched are exactly the tiles the first seconds of playback will request.
+  const leg = LEGS[0];
+  const samples = 24;
+  for (let i = 0; i <= samples; i++) {
+    const legFrac = i / samples;
+    updateMainCamera(computeState(leg, legFrac), leg);
+    mainViewer.render();
+    // Fewer views held for longer, not more renders. Re-rendering a view
+    // whose requests are already in flight does not make the network faster;
+    // only waiting does. This was 3 renders x 20ms per point, which tripled
+    // the render cost while shortening the actual wait.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    el.btnWarmup.textContent = `🔥 ${Math.round((i / samples) * 100)}%`;
   }
-
-  for (let i = 0; i < points.length; i++) {
-    const p = points[i];
-    mainViewer.camera.setView({
-      destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.isFlight ? 6000 : 900),
-      orientation: { heading: 0, pitch: R.toRadians(-90), roll: 0 },
-    });
-    // Aggressive warmup: render 3 frames per waypoint with 20ms spacing
-    // This gives tiles much more time to load while keeping warmup reasonably fast
-    for (let f = 0; f < 3; f++) {
-      mainViewer.render();
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    el.btnWarmup.textContent = `🔥 ${Math.round(((i + 1) / points.length) * 100)}%`;
-  }
+  // updateMainCamera() carries smoothing state across calls. Reset it so the
+  // first real frame snaps to the true heading instead of easing in from
+  // wherever the warmup sweep left it.
+  smoothedHeadingRad = null;
+  lastChaseLegId = null;
 
   el.btnWarmup.textContent = "✓ Warmed Up";
   warmingUp = false;
@@ -1420,6 +1684,9 @@ async function warmUpTiles() {
 el.btnWarmup.addEventListener("click", warmUpTiles);
 el.btnPlay.addEventListener("click", () => {
   if (!hasStartedOnce) { startJourney(); return; }
+  // Cut the opening hold short rather than swallowing the click for ten
+  // seconds. holdAtStart() sets playing = true when it returns.
+  if (holdingAtStart) { holdingAtStart = false; return; }
   playing = !playing;
   el.btnPlay.textContent = playing ? "⏸" : "▶";
 });
@@ -1493,21 +1760,73 @@ el.btnReplay.addEventListener("click", () => {
   boundsMinLon = null;
   miniLon = miniLat = null;
   el.bookend.classList.add("hidden");
-  playing = true;
   el.btnPlay.textContent = "⏸";
   suppressNextChapterCard = true;
-  setTimeout(() => showChapterCard(findLegAt(simSeconds)), CHAPTER_CARD_START_DELAY_MS);
+  // Same opening hold as the first run, so a replayed take is framed and
+  // paced identically to the original rather than starting on blurry ground.
+  // startFactTicker() is called here too because clearPendingCelebrations()
+  // above kills the interval, and only startJourney() used to restart it —
+  // so before this, the fun facts stopped forever after one replay.
+  playing = false;
+  render();
+  (async () => {
+    const qs = new URLSearchParams(location.search);
+    await holdAtStart(qs.has("hold") ? parseFloat(qs.get("hold")) * 1000 : START_HOLD_MS);
+    playing = true;
+    startFactTicker();
+    setTimeout(() => showChapterCard(findLegAt(simSeconds)), CHAPTER_CARD_START_DELAY_MS);
+  })();
 });
 
 const CHAPTER_CARD_START_DELAY_MS = 1500;
 
-function startJourney() {
+// Beat between arriving at the starting point and the clock starting to run,
+// so the photogrammetry around and ahead of the opening position has time to
+// resolve before anything moves. Without it the first seconds of every take
+// are the ground sharpening on camera. Override with ?hold=N (seconds).
+const START_HOLD_MS = 10000;
+// Set while holding, so the play button can cut the hold short instead of
+// being ignored for ten seconds.
+let holdingAtStart = false;
+
+async function startJourney() {
   hasStartedOnce = true;
-  playing = true;
+  // playing stays FALSE through the hold: the render loop keeps running, so
+  // tiles keep streaming and the camera sits at the start position, but
+  // simSeconds does not advance and no leg-timed overlay fires yet.
+  playing = false;
   el.btnPlay.textContent = "⏸";
   el.bookend.classList.add("hidden");
+  // One immediate render so the camera is ON the opening shot before the
+  // hold begins — otherwise the first frames of the hold are spent loading
+  // tiles for wherever the idle establishing camera happened to be pointing.
+  render();
+
+  const qs = new URLSearchParams(location.search);
+  const holdMs = qs.has("hold") ? parseFloat(qs.get("hold")) * 1000 : START_HOLD_MS;
+  await holdAtStart(holdMs);
+
+  playing = true;
   startFactTicker();
   setTimeout(() => showChapterCard(findLegAt(simSeconds)), CHAPTER_CARD_START_DELAY_MS);
+}
+
+// Holds for the full duration rather than exiting as soon as tilesLoaded goes
+// true. A fixed beat keeps every take the same length, which matters more for
+// cutting the footage than shaving a few seconds off a pre-roll — and
+// tilesLoaded only covers the CURRENT view, so it can flip true while the
+// ground the camera is about to move over is still empty.
+async function holdAtStart(ms) {
+  if (!(ms > 0)) return;
+  holdingAtStart = true;
+  const started = performance.now();
+  while (holdingAtStart && performance.now() - started < ms) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  const waited = ((performance.now() - started) / 1000).toFixed(1);
+  console.info(`Start hold: ${waited}s` +
+    (photoTileset ? ` · tilesLoaded=${photoTileset.tilesLoaded} pending=${photoTileset.statistics?.numberOfPendingRequests}` : ""));
+  holdingAtStart = false;
 }
 
 // ================================================================= BOOT ==
@@ -1523,6 +1842,16 @@ window.__DEBUG__ = {
   // Dial minimap brightness live in devtools instead of edit-build-reload:
   //   __DEBUG__.setMinimapBrightness(1.8)
   // Once it looks right, put that number in MINIMAP_BRIGHTNESS so it sticks.
+  // Colour-match the gap-filling globe imagery to the Google tiles live:
+  //   __DEBUG__.setBaseImageryStyle({ saturation: 0.6, gamma: 1.2 })
+  // Only the keys you pass change. Paste the final object into
+  // BASE_IMAGERY_STYLE once it matches.
+  setBaseImageryStyle(partial) {
+    if (!window.__baseLayer) return "no base imagery layer — Ion asset 2 failed to load";
+    Object.assign(BASE_IMAGERY_STYLE, partial);
+    applyBaseImageryStyle(window.__baseLayer, BASE_IMAGERY_STYLE);
+    return { ...BASE_IMAGERY_STYLE };
+  },
   setMinimapBrightness(v) {
     if (!window.__miniLayer) return "no minimap basemap layer — check __miniProbe";
     // Multiply the stored baseline, never the live value: back-computing the
@@ -1568,6 +1897,11 @@ function preloadPhotoMemories() {
     if (qs.has("record")) setSpeedDialValue(RECORD_SPEED_DIAL_VALUE);
     if (qs.has("fast")) playbackMultiplier = parseFloat(qs.get("fast")) || playbackMultiplier;
 
+    // ?hold=N sets how many seconds the journey sits on the opening shot,
+    // letting photogrammetry around and ahead of the start position resolve
+    // before the clock starts. Default 10; ?hold=0 disables it. Applies to
+    // Begin the Journey, Replay and ?autostart alike, so every take opens the
+    // same way.
     const shouldWarmUp = qs.has("warmup");
     const shouldAutostart = qs.has("autostart");
 
