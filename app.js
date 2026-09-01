@@ -137,7 +137,12 @@ mainViewer.clock.shouldAnimate = false;
 // (vs. the 2.0 default) demands roughly 4x the tile density, and all of it is
 // bandwidth taken away from the tiles you actually want.
 mainViewer.scene.globe.maximumScreenSpaceError = 3.0;
-mainViewer.scene.globe.tileCacheSize = 1000;
+// 1000 imagery tiles is up to ~250MB of 256x256 RGBA sitting alongside the
+// tileset's own 512MB budget — and this globe is only ever a backdrop for
+// coverage gaps, seen through a camera that never stops moving forward, so a
+// large retained cache buys almost nothing. Anything scrolled off the back of
+// the route will not be looked at again on a one-way journey.
+mainViewer.scene.globe.tileCacheSize = 200;
 mainViewer.scene.globe.enableLighting = true;
 mainViewer.scene.skyAtmosphere.show = true;
 mainViewer.scene.fog.enabled = true;
@@ -931,8 +936,13 @@ let miniFrameCounter = 0;
 // route actually wants: load what's ahead through the normal frustum, drop
 // what's behind on a schedule. Leg boundaries alone were too coarse — the
 // NYC-to-Stroudsburg drive is a single long leg.
-const TILE_TRIM_INTERVAL_SIM_SEC = 4;
-let lastTileTrimSim = -Infinity;
+// Measured in WALL-CLOCK seconds, not sim seconds. Sim time is scaled by
+// playbackMultiplier, which at record speed is ~0.025 — so a 4 sim-second
+// interval was actually firing once every 2.6 real minutes, not every 4
+// seconds. Memory pressure is a wall-clock phenomenon; pace against the clock
+// the browser lives in.
+const TILE_TRIM_INTERVAL_MS = 4000;
+let lastTileTrimMs = -Infinity;
 let chapterTimer = null;
 // Suppresses the leg-transition block's automatic chapter-card display for
 // one upcoming transition — set right before (re)starting the journey so the
@@ -1475,8 +1485,9 @@ function render() {
   // Release ground we've already passed. Unloads are queued and executed on
   // the next frame inside the render loop, so the WebGL deletes stay on the
   // right thread — this is safe to call from here.
-  if (photoTileset && playing && simSeconds - lastTileTrimSim > TILE_TRIM_INTERVAL_SIM_SEC) {
-    lastTileTrimSim = simSeconds;
+  const nowMsForTrim = performance.now();
+  if (photoTileset && playing && nowMsForTrim - lastTileTrimMs > TILE_TRIM_INTERVAL_MS) {
+    lastTileTrimMs = nowMsForTrim;
     photoTileset.trimLoadedTiles();
   }
 

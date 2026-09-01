@@ -649,6 +649,12 @@ export const LEGS = [
   // ------------------------------------------------------------------ DAY 3
   {
     id: "jfk_ground",
+    // Fully inside Google Photorealistic 3D Tiles coverage, so the globe
+    // underneath is invisible for this whole leg — yet it was still
+    // downloading, decoding and caching basemap imagery nobody can see,
+    // on top of the tileset's own budget. Hiding it removes that entire
+    // cost exactly where the memory pressure peaks.
+    hideGlobe: true,
     type: "transfer",
     label: "JFK · Immigration & Rental Pickup",
     chapterTitle: "WELCOME TO THE USA",
@@ -675,6 +681,12 @@ export const LEGS = [
   },
   {
     id: "drive4",
+    // Fully inside Google Photorealistic 3D Tiles coverage, so the globe
+    // underneath is invisible for this whole leg — yet it was still
+    // downloading, decoding and caching basemap imagery nobody can see,
+    // on top of the tileset's own budget. Hiding it removes that entire
+    // cost exactly where the memory pressure peaks.
+    hideGlobe: true,
     type: "drive",
     vehicle: "minivan",
     label: "JFK → Stroudsburg",
