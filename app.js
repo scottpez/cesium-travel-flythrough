@@ -545,6 +545,13 @@ const J = Cesium.JulianDate;
 
 function easeOutCubic(t) { t = R.clamp(t, 0, 1); return 1 - Math.pow(1 - t, 3); }
 function easeInCubic(t) { t = R.clamp(t, 0, 1); return Math.pow(t, 3); }
+// Slow out of the turn and slow into the stop, so the single orbit at each
+// stop reads as a deliberate camera move that settles, rather than a loop
+// that was cut off when the timer ran out.
+function easeInOutCubic(t) {
+  t = R.clamp(t, 0, 1);
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
 
 for (const leg of LEGS) {
   leg.realStart = J.fromIso8601(leg.startUTC);
@@ -1188,7 +1195,31 @@ function updateLocalClock(realTime, lon) {
 
 // ============================================================= CAMERA ====
 let idleAngle = 0;
-let orbitAngle = 0;
+// Fraction of a stop's screen time spent completing the single revolution.
+// The remainder is held still, facing the way the journey is about to leave.
+const ORBIT_SWEEP_FRAC = 0.65;
+
+// The heading the orbit settles on: the direction of travel at the START of
+// the next leg that actually moves. Landing on that means the held shot is
+// already pointing the way the journey departs, and the cut into the chase
+// camera has no rotation in it at all.
+//
+// Skips forward past any further static legs (a border stop followed by a
+// hotel, say) to find the next one with real waypoints, and caches the result
+// on the leg — computeState() is not free and this answer never changes.
+function orbitEndHeadingFor(leg) {
+  if (leg._orbitEndHeading !== undefined) return leg._orbitEndHeading;
+  let heading = 0;
+  for (let i = leg._index + 1; i < LEGS.length; i++) {
+    const next = LEGS[i];
+    if (next.waypoints && next.waypoints.length > 1) {
+      heading = computeState(next, 0).heading;
+      break;
+    }
+  }
+  leg._orbitEndHeading = heading;
+  return heading;
+}
 // Real road data has actual sharp turns and tightly-spaced points at
 // intersections/interchanges — computing heading fresh every frame from
 // instantaneous position deltas (as before) makes the camera visibly snap
@@ -1215,12 +1246,36 @@ function updateMainCamera(state, leg) {
   const target = Cesium.Cartesian3.fromDegrees(state.lon, state.lat, targetHeight);
 
   if (leg.cameraStyle === "orbit" || state.isStatic) {
-    orbitAngle += 0.0028;
     lastChaseLegId = null; // next chase leg should snap fresh, not smooth in from a stale heading
     const pitch = R.toRadians(-36);
     const range = leg.type === "stay" ? 550 : 450;
-    mainViewer.camera.lookAt(target, new Cesium.HeadingPitchRange(orbitAngle, pitch, range));
-    lastCameraDebug = { style: "orbit", headingDeg: R.toDegrees(orbitAngle) % 360, pitchDeg: -36, targetHeight, range };
+
+    // Exactly one revolution, then hold.
+    //
+    // This used to accumulate a fixed angle per FRAME, which meant the stop
+    // spun for as long as the leg lasted, at a speed that depended on the
+    // frame rate and not at all on the speed dial — so at record speed it
+    // became a very long, very slow, unmotivated rotation, and it stopped
+    // wherever it happened to be when the leg ended.
+    //
+    // Driving it from state.frac instead makes it deterministic: one full
+    // turn regardless of frame rate or playback speed, finishing on the
+    // heading the next leg departs on and holding there for the rest of the
+    // stop. Starting a revolution behind that heading (endHeading - 2pi) is
+    // the same orientation modulo a full turn, so the sweep begins and ends
+    // pointing the same way while still travelling all the way round.
+    const endHeading = orbitEndHeadingFor(leg);
+    const sweep = easeInOutCubic(R.clamp(state.frac / ORBIT_SWEEP_FRAC, 0, 1));
+    const heading = endHeading - 2 * Math.PI * (1 - sweep);
+
+    mainViewer.camera.lookAt(target, new Cesium.HeadingPitchRange(heading, pitch, range));
+    lastCameraDebug = {
+      style: "orbit",
+      headingDeg: ((R.toDegrees(heading) % 360) + 360) % 360,
+      endHeadingDeg: ((R.toDegrees(endHeading) % 360) + 360) % 360,
+      sweep: sweep >= 1 ? "held" : `${(sweep * 100).toFixed(0)}%`,
+      pitchDeg: -36, targetHeight, range,
+    };
     return;
   }
 
@@ -1564,6 +1619,9 @@ function render() {
       `travel hdg   ${lastCameraDebug.travelHeadingDeg?.toFixed(1) ?? "-"}°\n` +
       `camera hdg   ${lastCameraDebug.headingDeg?.toFixed(1) ?? "-"}°\n` +
       `camera pitch ${lastCameraDebug.pitchDeg?.toFixed(1) ?? "-"}°\n` +
+      (lastCameraDebug.style === "orbit"
+        ? `orbit sweep  ${lastCameraDebug.sweep} → settles ${lastCameraDebug.endHeadingDeg?.toFixed(1)}°\n`
+        : "") +
       `target h     ${lastCameraDebug.targetHeight?.toFixed(1) ?? "-"} m\n` +
       `vehicle h    ${state.height.toFixed(1)} m\n` +
       `cam actual h ${cam ? cam.height.toFixed(1) : "-"} m\n` +
