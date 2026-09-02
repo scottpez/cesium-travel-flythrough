@@ -375,6 +375,10 @@ async function setupMinimapImagery() {
 // or disabled. Used by the per-leg coverage toggle in render().
 let photoTileset = null;
 
+// LOD skipping: fast descents, but visible popping as tiles swap levels.
+// See the note at the tileset options for the trade.
+const SKIP_LEVEL_OF_DETAIL = false;
+
 // Google Photorealistic 3D Tiles is not global — coverage is dense over the
 // US/Europe/Japan and much thinner elsewhere, and there is none at all over
 // open ocean. Those gaps used to render as a bare untextured ellipsoid,
@@ -503,8 +507,14 @@ async function setupTerrainAndBuildings() {
 
         // Descend straight to the LOD we need instead of loading every level
         // on the way down. Essential when a flight leg drops from 10,000m to
-        // ground in a few seconds.
-        skipLevelOfDetail: true,
+        // ground in a few seconds — but it is also the classic cause of
+        // visible LOD popping, because it renders a coarse tile and then
+        // swaps in a much finer one with no intermediate step. Turned off by
+        // default now that the heap log has shown memory is not the binding
+        // constraint (226MB used against a 4192MB limit): smooth refinement
+        // matters more here than descent speed. Set true to trade flicker
+        // back for faster descents.
+        skipLevelOfDetail: SKIP_LEVEL_OF_DETAIL,
 
         // NOT immediatelyLoadDesiredLevelOfDetail. That flag means "only
         // tiles that meet the maximum screen space error will ever be
@@ -948,8 +958,6 @@ let miniFrameCounter = 0;
 // interval was actually firing once every 2.6 real minutes, not every 4
 // seconds. Memory pressure is a wall-clock phenomenon; pace against the clock
 // the browser lives in.
-const TILE_TRIM_INTERVAL_MS = 4000;
-let lastTileTrimMs = -Infinity;
 let chapterTimer = null;
 // Suppresses the leg-transition block's automatic chapter-card display for
 // one upcoming transition — set right before (re)starting the journey so the
@@ -1540,11 +1548,16 @@ function render() {
   // Release ground we've already passed. Unloads are queued and executed on
   // the next frame inside the render loop, so the WebGL deletes stay on the
   // right thread — this is safe to call from here.
-  const nowMsForTrim = performance.now();
-  if (photoTileset && playing && nowMsForTrim - lastTileTrimMs > TILE_TRIM_INTERVAL_MS) {
-    lastTileTrimMs = nowMsForTrim;
-    photoTileset.trimLoadedTiles();
-  }
+  // NO periodic trimLoadedTiles() here. It was added on the assumption that
+  // the tile cache would grow without bound, which turned out to be false:
+  // Cesium already caps the tileset at cacheBytes + maximumCacheOverflowBytes
+  // and lowers effective screen-space error to stay inside it. Forcing a trim
+  // back down to cacheBytes on a timer therefore evicts the overflow working
+  // set the CURRENT view legitimately needs, which is immediately re-requested
+  // — an unload/reload cycle on a fixed period, seen as the whole scene
+  // flickering. It was fighting Cesium's own memory manager for no benefit.
+  // Trimming now happens only at leg boundaries, where the region really is
+  // behind us and a pop is masked by the transition.
 
   mainViewer.clock.currentTime = state.realTime;
   mainViewer.render();
