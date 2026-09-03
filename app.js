@@ -150,8 +150,22 @@ mainViewer.scene.fog.density = 0.0002; // Reduce fog for better tile visibility
 mainViewer.scene.globe.depthTestAgainstTerrain = true;
 mainViewer.scene.screenSpaceCameraController.enableCollisionDetection = true;
 // Post-processing: TAA for smoother rendering + brightness boost
-mainViewer.scene.postProcessStages.fxaa.enabled = false;
-if (Cesium.PostProcessStageLibrary.createTemporalAntiAliasingStage) {
+// Temporal AA needs a near-stationary camera to converge; this one never
+// stops. Off by default — see the note below. Set true to experiment.
+const USE_TEMPORAL_AA = false;
+
+// Antialiasing. TAA was enabled here and FXAA turned off, which is backwards
+// for this scene: temporal AA works by ACCUMULATING samples across frames, so
+// it needs a camera that is stationary or nearly so to converge. This camera
+// is in constant forward motion for the entire run, so TAA never resolves —
+// it smears what it can and leaves the rest aliased, which is the "jagged"
+// look. With FXAA off there was then nothing cleaning up edges at all.
+//
+// FXAA is a single-frame edge filter, so it works identically whether the
+// camera is moving or not. Scene MSAA (msaaSamples, default 4 on WebGL2) is
+// also left alone to do the real geometric antialiasing underneath it.
+mainViewer.scene.postProcessStages.fxaa.enabled = true;
+if (USE_TEMPORAL_AA && Cesium.PostProcessStageLibrary.createTemporalAntiAliasingStage) {
   mainViewer.scene.postProcessStages.add(Cesium.PostProcessStageLibrary.createTemporalAntiAliasingStage());
 }
 
@@ -379,6 +393,47 @@ let photoTileset = null;
 // See the note at the tileset options for the trade.
 const SKIP_LEVEL_OF_DETAIL = false;
 
+// ---- Tile quality profiles ------------------------------------------------
+// Every one of these settings was tightened to survive running out of memory,
+// and together they were capping how sharp the photogrammetry could ever get —
+// no amount of waiting helped, because the limits are targets, not budgets.
+//
+// The cacheBytes one is the least obvious and the most damaging. Cesium's own
+// documentation: if the tiles needed to meet maximumScreenSpaceError exceed
+// cacheBytes + maximumCacheOverflowBytes, then memoryAdjustedScreenSpaceError
+// "will be adjusted until the tiles required to meet the adjusted screen space
+// error" fit. A tight cap therefore does not stall loading — it permanently
+// coarsens the image in exactly the dense areas you most want detail.
+//
+// The narrower drive lens cut the ground area in frame by ~99x, so the load
+// these caps were defending against is largely gone. "sharp" returns to
+// Cesium's defaults (and past them, where it helps a slow-recording camera);
+// "safe" keeps the conservative values. Switch with ?quality=safe.
+const QUALITY_PROFILES = {
+  sharp: {
+    cacheBytes: 1073741824,               // 1 GB — room to hold full detail
+    maximumCacheOverflowBytes: 536870912, // + 512 MB, Cesium's own default
+    maximumScreenSpaceError: 16,          // Cesium default; 24 was 1.5x coarser
+    dynamicScreenSpaceErrorFactor: 24,    // Cesium default; 96 crushed distance
+    dynamicScreenSpaceErrorDensity: 0.0002,
+    // Recording runs at ~0.025x, so the camera creeps across the ground in
+    // wall-clock terms and there is ample time to fetch. Culling requests
+    // aggressively "because the camera is moving" is counterproductive here.
+    cullRequestsWhileMovingMultiplier: 30.0,
+    progressiveResolutionHeightFraction: 0.3, // Cesium default
+  },
+  safe: {
+    cacheBytes: 402653184,
+    maximumCacheOverflowBytes: 134217728,
+    maximumScreenSpaceError: 24,
+    dynamicScreenSpaceErrorFactor: 96,
+    dynamicScreenSpaceErrorDensity: 0.0003,
+    cullRequestsWhileMovingMultiplier: 120.0,
+    progressiveResolutionHeightFraction: 0.5,
+  },
+};
+const QUALITY = QUALITY_PROFILES[new URLSearchParams(location.search).get("quality")] ?? QUALITY_PROFILES.sharp;
+
 // Google Photorealistic 3D Tiles is not global — coverage is dense over the
 // US/Europe/Japan and much thinner elsewhere, and there is none at all over
 // open ocean. Those gaps used to render as a bare untextured ellipsoid,
@@ -495,60 +550,17 @@ async function setupTerrainAndBuildings() {
         // headroom is the right side of this trade for an unattended
         // 30-minute recording: a re-fetch costs a blurry second, running out
         // of memory costs the whole take.
-        cacheBytes: 402653184,                // 384 MB steady state
-        maximumCacheOverflowBytes: 134217728, // + 128 MB headroom (512 MB hard cap)
-
-        // The tileset's OWN detail knob (default 16). scene.globe's
-        // maximumScreenSpaceError has no effect here — different subsystem.
-        // This is the single biggest lever on how much photogrammetry has to
-        // arrive before a frame looks finished. A camera moving this fast
-        // cannot resolve 16 anyway.
-        maximumScreenSpaceError: 24,
-
-        // Descend straight to the LOD we need instead of loading every level
-        // on the way down. Essential when a flight leg drops from 10,000m to
-        // ground in a few seconds — but it is also the classic cause of
-        // visible LOD popping, because it renders a coarse tile and then
-        // swaps in a much finer one with no intermediate step. Turned off by
-        // default now that the heap log has shown memory is not the binding
-        // constraint (226MB used against a 4192MB limit): smooth refinement
-        // matters more here than descent speed. Set true to trade flicker
-        // back for faster descents.
+        cacheBytes: QUALITY.cacheBytes,
+        maximumCacheOverflowBytes: QUALITY.maximumCacheOverflowBytes,
+        maximumScreenSpaceError: QUALITY.maximumScreenSpaceError,
         skipLevelOfDetail: SKIP_LEVEL_OF_DETAIL,
-
-        // NOT immediatelyLoadDesiredLevelOfDetail. That flag means "only
-        // tiles that meet the maximum screen space error will ever be
-        // downloaded" — no coarse tile is loaded first, so the ground stays
-        // empty until the full-resolution tile arrives, with nothing shown in
-        // between. It reads as exactly the slow, late-loading ground it was
-        // meant to prevent.
-
-        // Put a rough layer down fast, then refine, rather than waiting for
-        // full resolution before drawing anything.
-        progressiveResolutionHeightFraction: 0.5,
-
-        // Coarsen tiles with distance. This is the tileset's own equivalent of
-        // fog's terrain optimisation, and it is the right complement to the
-        // narrower lens: the lens decides how much ground is in frame, this
-        // decides how much detail the far part of it gets. Factor is raised
-        // well above the default 24 because even a bounded view still reaches
-        // several kilometres, and nothing at that range survives being
-        // resampled down to 1080p at driving speed.
+        progressiveResolutionHeightFraction: QUALITY.progressiveResolutionHeightFraction,
         dynamicScreenSpaceError: true,
-        dynamicScreenSpaceErrorFactor: 96,
-        dynamicScreenSpaceErrorDensity: 0.0003,
-
-        // Discard requests the camera has already flown past instead of
-        // paying to fetch and decode ground we've left behind.
+        dynamicScreenSpaceErrorFactor: QUALITY.dynamicScreenSpaceErrorFactor,
+        dynamicScreenSpaceErrorDensity: QUALITY.dynamicScreenSpaceErrorDensity,
         cullRequestsWhileMoving: true,
-        cullRequestsWhileMovingMultiplier: 120.0,
-
-        // Tiles outside the centre cone are normally deferred until the
-        // camera has been still for foveatedTimeDelay seconds. This camera is
-        // never still, so with the 0.2s default the edges of frame would
-        // never fill in at all.
+        cullRequestsWhileMovingMultiplier: QUALITY.cullRequestsWhileMovingMultiplier,
         foveatedTimeDelay: 0.0,
-
         loadSiblings: false,
       }
     ));
