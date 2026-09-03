@@ -527,6 +527,17 @@ async function setupTerrainAndBuildings() {
         // full resolution before drawing anything.
         progressiveResolutionHeightFraction: 0.5,
 
+        // Coarsen tiles with distance. This is the tileset's own equivalent of
+        // fog's terrain optimisation, and it is the right complement to the
+        // narrower lens: the lens decides how much ground is in frame, this
+        // decides how much detail the far part of it gets. Factor is raised
+        // well above the default 24 because even a bounded view still reaches
+        // several kilometres, and nothing at that range survives being
+        // resampled down to 1080p at driving speed.
+        dynamicScreenSpaceError: true,
+        dynamicScreenSpaceErrorFactor: 96,
+        dynamicScreenSpaceErrorDensity: 0.0003,
+
         // Discard requests the camera has already flown past instead of
         // paying to fetch and decode ground we've left behind.
         cullRequestsWhileMoving: true,
@@ -1248,6 +1259,65 @@ let lastChaseLegId = null;
 const CAMERA_HEIGHT_MARGIN = { flight: 60, other: 70 };
 let lastCameraDebug = {};
 
+// ---- Camera lens profiles -------------------------------------------------
+// Cesium's frustum.fov is the HORIZONTAL angle for a landscape canvas, and it
+// defaults to 60°. At 16:9 that makes the vertical FOV 36°, so the half-angle
+// is 18°. The drive camera sits at pitch -14°, which puts the TOP OF THE FRAME
+// at +4° — above the horizon. Ground in frame therefore runs all the way to
+// the geometric horizon, about 48km out, sweeping roughly 1,230 km² of
+// territory into the view frustum every single frame.
+//
+// Over the Atlantic that is free, because there is no photogrammetry to load.
+// Over New York it is thousands of tile requests per frame, which is what
+// saturates the request scheduler and stalls the render loop.
+//
+// The load collapses non-linearly once the top of the frame drops below the
+// horizon, and narrowing the lens gets there while also narrowing the wedge:
+//
+//   hFOV 60° -> top +4.0°, far 48.5km, 1234 km²  (100%)
+//   hFOV 45° -> top -0.9°, far 12.0km,   56 km²  (4.6%)
+//   hFOV 42° -> top -1.8°, far  5.9km,   12 km²  (1.0%)
+//   hFOV 40° -> top -2.4°, far  4.4km,  6.6 km²  (0.5%)
+//
+// A 42° lens is also a longer, more compressed, more cinematic look than 60°,
+// which is wide enough to read as slightly fisheyed. The real cost is that
+// the sky leaves the frame — the vista IS the expense.
+//
+// `far` is left at Cesium's default unless a profile sets it. Clamping the far
+// plane keeps the sky but makes distant ground simply stop being drawn, which
+// needs haze to disguise; it is available per profile rather than on by
+// default.
+const CAMERA_PROFILES = {
+  // Bounded lens for dense photogrammetry. No sky, ~6km of visible ground.
+  tight: { fovDeg: 42, farM: null },
+  // Wide vista. Only affordable where coverage is sparse or absent — open
+  // desert, mid-ocean, rural stretches — where a 48km view costs nothing
+  // because there is nothing out there to load.
+  vista: { fovDeg: 60, farM: null },
+};
+
+// Per-leg override wins; otherwise drive legs get the bounded lens and
+// everything else keeps the wide one. Orbit shots at stops sit at pitch -36°,
+// which already puts the top of frame well below the horizon, so they are
+// bounded regardless of lens.
+function cameraProfileFor(leg) {
+  if (leg.cameraProfile && CAMERA_PROFILES[leg.cameraProfile]) return CAMERA_PROFILES[leg.cameraProfile];
+  if (leg.type === "drive") return CAMERA_PROFILES.tight;
+  return CAMERA_PROFILES.vista;
+}
+
+const DEFAULT_CAMERA_FAR = mainViewer.camera.frustum.far;
+let currentCameraProfileName = null;
+
+function applyCameraProfile(leg) {
+  const p = cameraProfileFor(leg);
+  const frustum = mainViewer.camera.frustum;
+  // Orthographic frustums have no fov; guard rather than assume perspective.
+  if (frustum && frustum.fov !== undefined) frustum.fov = R.toRadians(p.fovDeg);
+  if (frustum && frustum.far !== undefined) frustum.far = p.farM ?? DEFAULT_CAMERA_FAR;
+  currentCameraProfileName = Object.keys(CAMERA_PROFILES).find((k) => CAMERA_PROFILES[k] === p) ?? "custom";
+}
+
 function updateMainCamera(state, leg) {
   const margin = leg.type === "flight" ? CAMERA_HEIGHT_MARGIN.flight : CAMERA_HEIGHT_MARGIN.other;
   const targetHeight = state.height + margin;
@@ -1412,6 +1482,9 @@ function render() {
     if (leg.poiStart) showPoi(leg.poiStart, "");
     else if (leg.poi) showPoi(leg.poi, "");
     el.legName.textContent = leg.label;
+    // Swap the lens for this leg. Done on transition rather than per frame so
+    // it never fights the camera flight during the intro descent.
+    applyCameraProfile(leg);
     // The globe (terrain + imagery) stays visible by default so it is always
     // there to fill photorealistic coverage gaps — that default is the whole
     // point, and forgetting to flag a leg costs a little z-fighting rather
@@ -1639,6 +1712,24 @@ function render() {
       `vehicle h    ${state.height.toFixed(1)} m\n` +
       `cam actual h ${cam ? cam.height.toFixed(1) : "-"} m\n` +
       `range        ${lastCameraDebug.range ?? "-"} m\n` +
+      // Lens and its consequence. `top of frame` above 0° means the horizon is
+      // in shot and the ground runs to it — the condition that pulls a
+      // thousand square kilometres of tiles per frame.
+      (() => {
+        const f = mainViewer.camera.frustum;
+        if (!f || f.fov === undefined) return "";
+        const hFov = f.fov;
+        const vHalf = Math.atan(Math.tan(hFov / 2) / (f.aspectRatio || 16 / 9));
+        const camH = cam ? Math.max(cam.height - state.height, 1) : 1;
+        const topEl = R.toRadians(lastCameraDebug.pitchDeg ?? 0) + vHalf;
+        const horizon = Math.sqrt(2 * 6371000 * camH + camH * camH);
+        const dFar = topEl >= 0 ? horizon : Math.min(camH / Math.tan(-topEl), horizon);
+        const area = 0.5 * hFov * (dFar * dFar) / 1e6;
+        return `lens         ${currentCameraProfileName ?? "-"} · ${R.toDegrees(hFov).toFixed(0)}° hFOV\n` +
+          `top of frame ${R.toDegrees(topEl) >= 0 ? "+" : ""}${R.toDegrees(topEl).toFixed(1)}°` +
+          `${R.toDegrees(topEl) >= 0 ? "  ** HORIZON IN SHOT **" : ""}\n` +
+          `ground ahead ${(dFar / 1000).toFixed(1)} km  (~${area.toFixed(1)} km² in frame)\n`;
+      })() +
       `--- memory ---\n` +
       // performance.memory is Chrome-only and reports the V8 heap only — GPU
       // and tile texture memory live outside it. Watch both: a flat heap with

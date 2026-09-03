@@ -154,6 +154,11 @@ export const LEGS = [
   },
   {
     id: "drive2",
+    // Open desert between Kuwait and Dammam. Google photorealistic coverage
+    // out here is thin to absent, so a 48km vista costs almost nothing to
+    // load — this is exactly where the wide lens is free. Switch to "tight"
+    // if this leg ever turns out to be denser than expected.
+    cameraProfile: "vista",
     type: "drive",
     vehicle: "van",
     label: "Drive to Dammam",
@@ -852,6 +857,9 @@ export const LEGS = [
   // ------------------------------------------------------------------ DAY 5
   {
     id: "drive5",
+    // Rural Pennsylvania: ridge-and-valley country, sparse photogrammetry,
+    // and the long views are the whole point of the leg. Wide lens.
+    cameraProfile: "vista",
     type: "drive",
     vehicle: "minivan",
     label: "Stroudsburg → State College",
