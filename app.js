@@ -165,6 +165,26 @@ const USE_TEMPORAL_AA = false;
 // camera is moving or not. Scene MSAA (msaaSamples, default 4 on WebGL2) is
 // also left alone to do the real geometric antialiasing underneath it.
 mainViewer.scene.postProcessStages.fxaa.enabled = true;
+// MSAA does the real geometric antialiasing, below FXAA's edge filtering.
+// Cesium defaults to 4; 8 is the practical ceiling and visibly cleans up the
+// dense high-contrast edges photogrammetry is full of — roof lines, railings,
+// bridge cables — which are exactly what reads as "jagged" at 1080p.
+// WebGL2 only; Cesium ignores it where multisample render targets are absent.
+mainViewer.scene.msaaSamples = 8;
+
+// Supersampling: render larger than the canvas and scale down. ?ss=1.5 renders
+// 2.25x the pixels, which both smooths edges beyond what any post-process
+// filter can and makes the tileset request finer tiles, because screen-space
+// error is measured in pixels and there are now more of them. It is the single
+// biggest visual upgrade available for a recording — and the most expensive,
+// scaling GPU memory and fill rate quadratically. Off by default; worth a test
+// run at 1.25 or 1.5 before committing to a take.
+const ssParam = parseFloat(new URLSearchParams(location.search).get("ss"));
+if (Number.isFinite(ssParam) && ssParam > 0) {
+  // Plain Math, not Cesium.Math — the `R` alias is declared further down the
+  // file and this block runs at module top level, before it exists.
+  mainViewer.resolutionScale = Math.min(2.0, Math.max(0.5, ssParam));
+}
 if (USE_TEMPORAL_AA && Cesium.PostProcessStageLibrary.createTemporalAntiAliasingStage) {
   mainViewer.scene.postProcessStages.add(Cesium.PostProcessStageLibrary.createTemporalAntiAliasingStage());
 }
@@ -413,9 +433,30 @@ const QUALITY_PROFILES = {
   sharp: {
     cacheBytes: 1073741824,               // 1 GB — room to hold full detail
     maximumCacheOverflowBytes: 536870912, // + 512 MB, Cesium's own default
-    maximumScreenSpaceError: 16,          // Cesium default; 24 was 1.5x coarser
-    dynamicScreenSpaceErrorFactor: 24,    // Cesium default; 96 crushed distance
+
+    // THE detail knob, and the biggest single lever on how sharp the
+    // photogrammetry gets. It is a pixel-error budget: 16 (Cesium's default)
+    // means a tile may be off by 16 screen pixels before a finer one is
+    // fetched. Halving it to 8 roughly doubles the linear resolution asked
+    // for. Affordable only because the narrower drive lens cut the ground
+    // area in frame by ~99x — this is where that saving gets spent.
+    maximumScreenSpaceError: 8,
+
+    // Distance falloff OFF. It exists for horizon views that reach tens of
+    // kilometres; the tight lens tops out around 6km, and every metre of that
+    // is in shot. Coarsening the far half of a frame that shallow just makes
+    // the middle distance mushy for no meaningful saving.
+    dynamicScreenSpaceError: false,
+    dynamicScreenSpaceErrorFactor: 24,
     dynamicScreenSpaceErrorDensity: 0.0002,
+
+    // Foveation OFF. It raises screen-space error for tiles away from the
+    // centre of the screen, on the assumption a viewer is looking at the
+    // middle. This is going out as video, where the edges of frame are
+    // composed shots in their own right and get the same scrutiny as the
+    // centre — soft corners would be visible in every frame.
+    foveatedScreenSpaceError: false,
+
     // Recording runs at ~0.025x, so the camera creeps across the ground in
     // wall-clock terms and there is ample time to fetch. Culling requests
     // aggressively "because the camera is moving" is counterproductive here.
@@ -426,8 +467,10 @@ const QUALITY_PROFILES = {
     cacheBytes: 402653184,
     maximumCacheOverflowBytes: 134217728,
     maximumScreenSpaceError: 24,
+    dynamicScreenSpaceError: true,
     dynamicScreenSpaceErrorFactor: 96,
     dynamicScreenSpaceErrorDensity: 0.0003,
+    foveatedScreenSpaceError: true,
     cullRequestsWhileMovingMultiplier: 120.0,
     progressiveResolutionHeightFraction: 0.5,
   },
@@ -555,9 +598,10 @@ async function setupTerrainAndBuildings() {
         maximumScreenSpaceError: QUALITY.maximumScreenSpaceError,
         skipLevelOfDetail: SKIP_LEVEL_OF_DETAIL,
         progressiveResolutionHeightFraction: QUALITY.progressiveResolutionHeightFraction,
-        dynamicScreenSpaceError: true,
+        dynamicScreenSpaceError: QUALITY.dynamicScreenSpaceError,
         dynamicScreenSpaceErrorFactor: QUALITY.dynamicScreenSpaceErrorFactor,
         dynamicScreenSpaceErrorDensity: QUALITY.dynamicScreenSpaceErrorDensity,
+        foveatedScreenSpaceError: QUALITY.foveatedScreenSpaceError,
         cullRequestsWhileMoving: true,
         cullRequestsWhileMovingMultiplier: QUALITY.cullRequestsWhileMovingMultiplier,
         foveatedTimeDelay: 0.0,
