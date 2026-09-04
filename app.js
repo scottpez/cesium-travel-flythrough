@@ -533,6 +533,104 @@ function applyBaseImageryStyle(layer, style) {
   layer.contrast = style.contrast;
 }
 
+// Builds a fresh photorealistic tileset. Factored out because the tileset has
+// to be RECREATED periodically — see recyclePhotoTilesetIfNeeded().
+function createPhotoTileset(extraOptions = {}) {
+  return Promise.resolve(Cesium.createGooglePhotorealistic3DTileset(
+    GOOGLE_MAPS_API_KEY,
+    {
+      // cacheBytes bounds tile CONTENT (geometry and textures). It does not
+      // bound the tile TREE — see recyclePhotoTilesetIfNeeded() for why that
+      // distinction is the whole ballgame.
+      cacheBytes: QUALITY.cacheBytes,
+      maximumCacheOverflowBytes: QUALITY.maximumCacheOverflowBytes,
+      maximumScreenSpaceError: QUALITY.maximumScreenSpaceError,
+      skipLevelOfDetail: SKIP_LEVEL_OF_DETAIL,
+      progressiveResolutionHeightFraction: QUALITY.progressiveResolutionHeightFraction,
+      dynamicScreenSpaceError: QUALITY.dynamicScreenSpaceError,
+      dynamicScreenSpaceErrorFactor: QUALITY.dynamicScreenSpaceErrorFactor,
+      dynamicScreenSpaceErrorDensity: QUALITY.dynamicScreenSpaceErrorDensity,
+      foveatedScreenSpaceError: QUALITY.foveatedScreenSpaceError,
+      cullRequestsWhileMoving: true,
+      cullRequestsWhileMovingMultiplier: QUALITY.cullRequestsWhileMovingMultiplier,
+      foveatedTimeDelay: 0.0,
+      loadSiblings: false,
+      ...extraOptions,
+    }
+  ));
+}
+
+// ---- Tile-tree recycling --------------------------------------------------
+// The failure that kept killing this app was never GPU memory. A debug capture
+// taken moments before a crash on the JFK->Stroudsburg leg read:
+//
+//     js heap      4054/4192 MB     <- 97% of the V8 limit
+//     tile mem     1023 MB          <- content cache, behaving correctly
+//     tiles loaded 1734842          <- 1.7 MILLION Cesium3DTile objects
+//
+// Google Photorealistic 3D Tiles is streamed: every region traversed adds tile
+// objects to an in-memory tree, and unloading a tile's CONTENT does not remove
+// its NODE. cacheBytes caps content and there is no equivalent cap on the tree,
+// so it only ever grows — about 2.4KB per tile, which is the entire heap at
+// that count. trimLoadedTiles() frees content, not nodes, so it cannot help.
+//
+// The only way to drop the tree is to destroy the tileset. Recycling swaps in a
+// fresh one whose tree starts empty and only grows for the current view.
+//
+// The swap is hidden rather than abrupt: the replacement is created with
+// show:false and preloadWhenHidden:true, so it streams the current view while
+// invisible. Only once it is loaded does it become visible and the old one get
+// destroyed. No blank frame, and no interval where two tilesets draw the same
+// geometry and z-fight.
+const TILE_TREE_MAX = 500000;      // ~1.2GB of tile objects
+const HEAP_FRACTION_MAX = 0.55;    // or over half the heap limit, whichever first
+let recyclingTileset = false;
+let tilesetRecycleCount = 0;
+
+function photoTileCount() {
+  return photoTileset?.statistics?.numberOfTilesTotal ?? 0;
+}
+
+function heapFraction() {
+  const m = performance.memory;
+  return m && m.jsHeapSizeLimit ? m.usedJSHeapSize / m.jsHeapSizeLimit : 0;
+}
+
+async function recyclePhotoTilesetIfNeeded() {
+  if (recyclingTileset || !photoTileset || !USE_PHOTOREALISTIC_TILES) return;
+  if (photoTileCount() < TILE_TREE_MAX && heapFraction() < HEAP_FRACTION_MAX) return;
+
+  recyclingTileset = true;
+  const old = photoTileset;
+  const beforeTiles = photoTileCount();
+  const beforeHeap = (performance.memory?.usedJSHeapSize ?? 0) / 1048576;
+  try {
+    const fresh = await createPhotoTileset({ show: false, preloadWhenHidden: true });
+    mainViewer.scene.primitives.add(fresh);
+
+    // Let it stream the current view while still hidden. Capped so a slow
+    // network can never stall playback indefinitely waiting for perfection.
+    const deadline = performance.now() + 6000;
+    while (!fresh.tilesLoaded && performance.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    fresh.show = true;
+    fresh.preloadWhenHidden = false;
+    photoTileset = fresh;
+    // remove() destroys the primitive, which is what actually frees the tree.
+    mainViewer.scene.primitives.remove(old);
+    tilesetRecycleCount++;
+    const afterHeap = (performance.memory?.usedJSHeapSize ?? 0) / 1048576;
+    console.info(`Tileset recycled #${tilesetRecycleCount}: ${beforeTiles.toLocaleString()} tiles, ` +
+      `heap ${beforeHeap.toFixed(0)}MB -> ${afterHeap.toFixed(0)}MB`);
+  } catch (e) {
+    console.warn("Tileset recycle failed; keeping the existing tileset.", e);
+  } finally {
+    recyclingTileset = false;
+  }
+}
+
 async function setupTerrainAndBuildings() {
   if (GLOBE_USES_3D_TERRAIN) {
     try {
@@ -576,40 +674,8 @@ async function setupTerrainAndBuildings() {
 
   if (!USE_PHOTOREALISTIC_TILES) return;
   try {
-    const tileset = await Promise.resolve(Cesium.createGooglePhotorealistic3DTileset(
-      GOOGLE_MAPS_API_KEY, // <-- 1st argument: The key string
-      {                    // <-- 2nd argument: The options object
-        // Memory ceiling. `maximumMemoryUsage` and `maximumCachedBytes` were
-        // tried here first and are silently ignored: the former was removed
-        // from Cesium3DTileset (it survives only on PointCloudShading), and
-        // the latter has never been an option. These two are the real names,
-        // both in bytes; the hard ceiling is their sum.
-        // Memory ceiling, deliberately conservative. This was 1GB + 256MB,
-        // which is a 1.25GB working set of decoded photogrammetry inside a
-        // single renderer process that is ALSO holding the V8 heap, two
-        // scene graphs and a TAA history buffer. Dense city coverage (NYC)
-        // on a low chase camera is where that budget actually gets claimed,
-        // and that is exactly where the tab died. Trading re-fetches for
-        // headroom is the right side of this trade for an unattended
-        // 30-minute recording: a re-fetch costs a blurry second, running out
-        // of memory costs the whole take.
-        cacheBytes: QUALITY.cacheBytes,
-        maximumCacheOverflowBytes: QUALITY.maximumCacheOverflowBytes,
-        maximumScreenSpaceError: QUALITY.maximumScreenSpaceError,
-        skipLevelOfDetail: SKIP_LEVEL_OF_DETAIL,
-        progressiveResolutionHeightFraction: QUALITY.progressiveResolutionHeightFraction,
-        dynamicScreenSpaceError: QUALITY.dynamicScreenSpaceError,
-        dynamicScreenSpaceErrorFactor: QUALITY.dynamicScreenSpaceErrorFactor,
-        dynamicScreenSpaceErrorDensity: QUALITY.dynamicScreenSpaceErrorDensity,
-        foveatedScreenSpaceError: QUALITY.foveatedScreenSpaceError,
-        cullRequestsWhileMoving: true,
-        cullRequestsWhileMovingMultiplier: QUALITY.cullRequestsWhileMovingMultiplier,
-        foveatedTimeDelay: 0.0,
-        loadSiblings: false,
-      }
-    ));
-    mainViewer.scene.primitives.add(tileset);
-    photoTileset = tileset;
+    photoTileset = await createPhotoTileset();
+    mainViewer.scene.primitives.add(photoTileset);
   } catch (e) {
     console.warn("Photorealistic 3D Tiles unavailable, falling back to World Terrain.", e);
     showNotice("Photorealistic 3D Tiles unavailable (check your API key/scopes) — using World Terrain instead.", e);
@@ -1677,6 +1743,11 @@ function render() {
   // Release ground we've already passed. Unloads are queued and executed on
   // the next frame inside the render loop, so the WebGL deletes stay on the
   // right thread — this is safe to call from here.
+  // Bound the tile TREE. Fire-and-forget: the function guards against
+  // re-entry and returns immediately when under threshold, so this costs
+  // two property reads per frame.
+  recyclePhotoTilesetIfNeeded();
+
   // NO periodic trimLoadedTiles() here. It was added on the assumption that
   // the tile cache would grow without bound, which turned out to be false:
   // Cesium already caps the tileset at cacheBytes + maximumCacheOverflowBytes
@@ -1794,7 +1865,8 @@ function render() {
         ? `${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)}/${(performance.memory.jsHeapSizeLimit / 1048576).toFixed(0)} MB`
         : "n/a (non-Chrome)"}\n` +
       `tile mem     ${photoTileset ? `${(photoTileset.totalMemoryUsageInBytes / 1048576).toFixed(0)} MB` : "-"}\n` +
-      `tiles loaded ${photoTileset?.statistics?.numberOfTilesTotal ?? "-"} pending=${photoTileset?.statistics?.numberOfPendingRequests ?? "-"}\n` +
+      `tile tree    ${(photoTileset?.statistics?.numberOfTilesTotal ?? 0).toLocaleString()} / ${TILE_TREE_MAX.toLocaleString()}  recycles=${tilesetRecycleCount}${recyclingTileset ? " (RECYCLING)" : ""}\n` +
+      `pending req  ${photoTileset?.statistics?.numberOfPendingRequests ?? "-"}\n` +
       `globe base   ${window.__baseSource ?? "NONE — gaps untextured"}\n` +
       `--- minimap ---\n` +
       `trail pts    ${miniTrail.length}\n` +
