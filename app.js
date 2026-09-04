@@ -440,7 +440,15 @@ const QUALITY_PROFILES = {
     // fetched. Halving it to 8 roughly doubles the linear resolution asked
     // for. Affordable only because the narrower drive lens cut the ground
     // area in frame by ~99x — this is where that saving gets spent.
-    maximumScreenSpaceError: 8,
+    // 12, not 8. This is the dominant driver of TILE-TREE growth, which is
+    // the actual heap constraint (see recyclePhotoTilesetIfNeeded). Tile count
+    // goes roughly as 1/sse^2, so 8 discovered ~1.73M tiles across the NYC
+    // drive — about 4GB of tile objects, which is the entire default V8 heap.
+    // 12 lands near 0.76M / ~1.8GB: sharper than the 16 this started at, and
+    // comfortably inside a default heap. Raise Chrome's ceiling with
+    //   --js-flags="--max-old-space-size=12288"
+    // and 8 becomes affordable again if you want it.
+    maximumScreenSpaceError: 12,
 
     // Distance falloff OFF. It exists for horizon views that reach tens of
     // kilometres; the tight lens tops out around 6km, and every metre of that
@@ -582,8 +590,11 @@ function createPhotoTileset(extraOptions = {}) {
 // invisible. Only once it is loaded does it become visible and the old one get
 // destroyed. No blank frame, and no interval where two tilesets draw the same
 // geometry and z-fight.
-const TILE_TREE_MAX = 500000;      // ~1.2GB of tile objects
-const HEAP_FRACTION_MAX = 0.55;    // or over half the heap limit, whichever first
+const TILE_TREE_MAX = 1100000;     // ~2.6GB of tile objects
+const HEAP_FRACTION_MAX = 0.72;    // or when the heap is genuinely close to its ceiling
+// The old tileset keeps rendering while the replacement preloads, so a long
+// window here is invisible to the viewer and simply buys a clean swap.
+const RECYCLE_PRELOAD_MAX_MS = 30000;
 let recyclingTileset = false;
 let tilesetRecycleCount = 0;
 
@@ -608,10 +619,21 @@ async function recyclePhotoTilesetIfNeeded() {
     const fresh = await createPhotoTileset({ show: false, preloadWhenHidden: true });
     mainViewer.scene.primitives.add(fresh);
 
-    // Let it stream the current view while still hidden. Capped so a slow
-    // network can never stall playback indefinitely waiting for perfection.
-    const deadline = performance.now() + 6000;
-    while (!fresh.tilesLoaded && performance.now() < deadline) {
+    // Let it stream the current view while still hidden. The OLD tileset stays
+    // visible and rendering throughout, so this wait costs nothing on screen —
+    // which is why it can afford to be long. The previous 6s cap was the cause
+    // of the blank-and-blurry swap: it expired, the swap happened anyway, and
+    // the fresh tileset had almost nothing loaded.
+    //
+    // tilesLoaded alone is the wrong signal here. For a streamed tileset under
+    // a camera that never stops, it can stay false indefinitely, so waiting on
+    // it always burns the full timeout. Accept "enough content is ready and
+    // the request queue has drained" as ready instead.
+    const deadline = performance.now() + RECYCLE_PRELOAD_MAX_MS;
+    while (performance.now() < deadline) {
+      const st = fresh.statistics ?? {};
+      const ready = (st.numberOfTilesWithContentReady ?? 0) > 0 && (st.numberOfPendingRequests ?? 1) === 0;
+      if (fresh.tilesLoaded || ready) break;
       await new Promise((r) => setTimeout(r, 100));
     }
 
