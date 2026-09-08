@@ -846,6 +846,25 @@ async function setupTerrainAndBuildings() {
         maximumLevel: GOOGLE_IMAGERY_MAX_LEVEL,
       });
       const layer = mainViewer.imageryLayers.addImageryProvider(provider);
+      // Cesium logs tile failures as a generic "Failed to obtain image tile
+      // X/Y/Level" with no status code, which cannot distinguish "Google has no
+      // imagery here" from "these requests are being refused". errorEvent
+      // carries the underlying error. Collected rather than logged per tile:
+      // one bad region produces hundreds of these and would bury everything
+      // else in the console during a recording.
+      window.__baseTileErrors = [];
+      if (provider.errorEvent) {
+        provider.errorEvent.addEventListener((err) => {
+          window.__baseTileErrors.push({
+            level: err?.level, x: err?.x, y: err?.y,
+            status: err?.statusCode ?? err?.error?.statusCode,
+            message: err?.message ?? String(err),
+          });
+          if (window.__baseTileErrors.length === 1) {
+            console.warn("First Google 2D tile failure (see __baseTileErrors for all):", err);
+          }
+        });
+      }
       applyBaseImageryStyle(layer, BASE_IMAGERY_STYLE);
       window.__baseLayer = layer;
       window.__baseSource = "google-2d-satellite";
@@ -2244,6 +2263,11 @@ function render() {
       `photo tiles  ${photoTileset ? (photoTileset.show ? "VISIBLE" : "hidden (hidePhotoTiles)") : "not loaded"}\n` +
       `globe        ${mainViewer.scene.globe.show ? "VISIBLE" : "hidden (hideGlobe)"}\n` +
       `globe base   ${window.__baseSource ?? "NONE — gaps untextured"} · maxLevel ${window.__baseMaxLevel ?? "-"}\n` +
+      // Should be exactly 1. More than one means imagery layers are stacked
+      // and the upper one wins — which is what a genuinely "blurry layer on
+      // top" would look like, as opposed to a coarser tile in the same layer.
+      `globe layers ${mainViewer.imageryLayers.length}${mainViewer.imageryLayers.length > 1 ? "  ** STACKED **" : ""}\n` +
+      `tile 404s    ${(window.__baseTileErrors ?? []).length}\n` +
       `--- minimap ---\n` +
       `trail pts    ${miniTrail.length}\n` +
       `mini height  ${miniHeight?.toFixed(0) ?? "-"} m\n` +
