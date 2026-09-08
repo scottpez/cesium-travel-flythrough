@@ -34,6 +34,10 @@ export const LEGS = [
   // ------------------------------------------------------------------ DAY 1
   {
     id: "drive1",
+    // No usable Google photogrammetry across this stretch, so the satellite
+    // globe is the shot. The aerial lens frames it from an altitude the
+    // imagery can actually resolve — see CAMERA_PROFILES.aerial.
+    hidePhotoTiles: true,
     // Google photogrammetry over open Gulf desert does not go to street
     // level. Requesting a fine level of detail here returns their
     // "Map data not yet available" placeholder — opaque grey geometry
@@ -144,19 +148,9 @@ export const LEGS = [
     // This is the real facility, geocoded by name: منفذ الخفجي الحدودي
     // (Khafji Border Crossing/Outlet), confirmed via OpenStreetMap.
     id: "border1",
-    // Google returns their "Map data not yet available" placeholder here at
-    // EVERY level of detail, not just fine ones — which is why sweeping the
-    // ?sse parameter changed nothing. It is not an LOD mismatch; there is
-    // simply no photogrammetry over this stretch of desert.
-    //
-    // It looked fine ahead and grey behind because distance was doing the
-    // hiding: far placeholders had not loaded yet so the Esri globe showed
-    // through, and as the vehicle closed on them they loaded and occluded
-    // it. Passing the ground did not remove tiles, it revealed them.
-    //
-    // Dropping the tileset lets the satellite backdrop render uninterrupted.
-    // Over flat desert that is the better shot anyway — there is no relief
-    // for photogrammetry to show, and Dammam itself is covered by drive3.
+    // No usable Google photogrammetry across this stretch, so the satellite
+    // globe is the shot. The aerial lens frames it from an altitude the
+    // imagery can actually resolve — see CAMERA_PROFILES.aerial.
     hidePhotoTiles: true,
     type: "transfer",
     vehicle: "van",
@@ -177,19 +171,9 @@ export const LEGS = [
   },
   {
     id: "drive2",
-    // Google returns their "Map data not yet available" placeholder here at
-    // EVERY level of detail, not just fine ones — which is why sweeping the
-    // ?sse parameter changed nothing. It is not an LOD mismatch; there is
-    // simply no photogrammetry over this stretch of desert.
-    //
-    // It looked fine ahead and grey behind because distance was doing the
-    // hiding: far placeholders had not loaded yet so the Esri globe showed
-    // through, and as the vehicle closed on them they loaded and occluded
-    // it. Passing the ground did not remove tiles, it revealed them.
-    //
-    // Dropping the tileset lets the satellite backdrop render uninterrupted.
-    // Over flat desert that is the better shot anyway — there is no relief
-    // for photogrammetry to show, and Dammam itself is covered by drive3.
+    // No usable Google photogrammetry across this stretch, so the satellite
+    // globe is the shot. The aerial lens frames it from an altitude the
+    // imagery can actually resolve — see CAMERA_PROFILES.aerial.
     hidePhotoTiles: true,
     // Google photogrammetry over open Gulf desert does not go to street
     // level. Requesting a fine level of detail here returns their

@@ -259,6 +259,37 @@ miniViewer.scene.screenSpaceCameraController.enableInputs = false;
 // 1.0 = each candidate's own baseline. Raise to lighten.
 const MINIMAP_BRIGHTNESS = 2.5;
 
+// Cap on the imagery zoom level requested from the globe basemap.
+//
+// Esri World Imagery answers a request for a level it has no imagery at with a
+// grey "Map data not yet available" tile rather than a 404 — so Cesium receives
+// a perfectly valid texture and draws it. Over remote desert their high-zoom
+// coverage runs out well before level 19, which is why the ground immediately
+// behind the vehicle went grey while the distance (needing a lower level)
+// stayed correct.
+//
+// Capping the level makes Cesium UPSAMPLE the deepest real tile instead of
+// requesting one that does not exist: softer close up, but actual imagery. That
+// is the whole trade, and it is the right way round — a blurry desert reads as
+// desert, a grey placeholder reads as a broken render.
+//
+// This costs nothing where the photogrammetry is good, because there the globe
+// is only a backdrop for gaps and is hidden outright on the NYC legs.
+// Tune with ?imglevel=N.
+// ?imglevel=N overrides it for whichever source is active; otherwise each
+// source uses its own default, because their ceilings differ enormously.
+const IMAGERY_LEVEL_OVERRIDE = (() => {
+  const q = parseInt(new URLSearchParams(location.search).get("imglevel"), 10);
+  return Number.isFinite(q) && q > 0 ? q : null;
+})();
+// Esri: conservative, because it answers a request above its regional coverage
+// with a grey "Map data not yet available" TILE rather than an error, and
+// Cesium happily draws it.
+const IMAGERY_MAX_LEVEL = IMAGERY_LEVEL_OVERRIDE ?? 16;
+// Google 2D: the provider's own default. Google's ceiling in any given region
+// is not published, and this is the number to sweep with ?imglevel to find it.
+const GOOGLE_IMAGERY_MAX_LEVEL = IMAGERY_LEVEL_OVERRIDE ?? 22;
+
 // Shared basemap catalogue, used by BOTH the minimap and the main globe's
 // gap-filling backdrop. Each entry carries a `probe`: a real tile URL fetched
 // before the source is used, because Cesium gives no usable signal when a
@@ -283,7 +314,7 @@ const BASEMAP_SOURCES = {
     create: () => new Cesium.UrlTemplateImageryProvider({
       url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       credit: new Cesium.Credit("Esri, Maxar, Earthstar Geographics"),
-      maximumLevel: 19,
+      maximumLevel: IMAGERY_MAX_LEVEL,
     }),
   },
   "esri-dark-gray": {
@@ -301,7 +332,7 @@ const BASEMAP_SOURCES = {
     create: () => new Cesium.UrlTemplateImageryProvider({
       url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
       credit: new Cesium.Credit("Esri, HERE, Garmin, © OpenStreetMap contributors"),
-      maximumLevel: 16,
+      maximumLevel: Math.min(IMAGERY_MAX_LEVEL, 16),
     }),
   },
   "openstreetmap": {
@@ -365,9 +396,43 @@ async function pickBasemap(order) {
 async function setupMinimapImagery() {
   miniViewer.imageryLayers.removeAll();
 
-  // Ion World Imagery first when the token actually works — sharpest option,
-  // no third-party host. Unlike the probed sources this one rejects on
-  // failure, so a try/catch is sufficient.
+  // Google 2D satellite first. It is the best imagery available here and it
+  // costs nothing extra: it authenticates with GoogleMaps.defaultApiKey, the
+  // same Map Tiles API key already loading the photorealistic 3D tiles.
+  //
+  // It matters because of resolution. The drive camera's nearest ground needs
+  // 0.18 m/pixel; Esri World Imagery tops out at 0.26 (level 19) and in remote
+  // desert does not reach even that, which is what produced their grey
+  // "Map data not yet available" tiles. Google 2D goes to level 22, so the
+  // ground-level chase camera can be sharp rather than needing to climb to an
+  // altitude the imagery can serve.
+  //
+  // Feature-detected: Google2DImageryProvider is not in every CesiumJS release,
+  // and index.html pins 1.121. If it is absent the chain falls through to Ion
+  // and then the probed keyless sources exactly as before.
+  if (Cesium.Google2DImageryProvider) {
+    try {
+      const provider = await Cesium.Google2DImageryProvider.fromUrl({
+        mapType: "satellite",
+        maximumLevel: GOOGLE_IMAGERY_MAX_LEVEL,
+      });
+      const layer = mainViewer.imageryLayers.addImageryProvider(provider);
+      applyBaseImageryStyle(layer, BASE_IMAGERY_STYLE);
+      window.__baseLayer = layer;
+      window.__baseSource = "google-2d-satellite";
+      window.__baseMaxLevel = GOOGLE_IMAGERY_MAX_LEVEL;
+      window.__baseProbe = [{ name: "google-2d-satellite", ok: true, detail: "Google Map Tiles API" }];
+      console.info("Globe backdrop: google-2d-satellite");
+      return;
+    } catch (e) {
+      console.warn("Google 2D imagery unavailable, falling back to Ion / keyless sources.", e);
+    }
+  } else {
+    console.info("Google2DImageryProvider not present in this CesiumJS build; skipping.");
+  }
+
+  // Ion World Imagery next when the token actually works. Unlike the probed
+  // sources this one rejects on failure, so a try/catch is sufficient.
   try {
     const provider = await Cesium.createWorldImageryAsync();
     const layer = miniViewer.imageryLayers.addImageryProvider(provider);
@@ -433,6 +498,21 @@ let photoTileset = null;
 // cut the tile tree, that is worth knowing and the flag makes it one reload to
 // find out. Watch `tile tree` in ?debug with and without.
 const SKIP_LEVEL_OF_DETAIL = new URLSearchParams(location.search).get("skiplod") === "1";
+
+// See the note at the tileset options: this is the prime suspect for tiles
+// vanishing once the vehicle passes them, and it is off unless asked for.
+const CULL_REQUESTS_WHILE_MOVING = new URLSearchParams(location.search).get("cullmoving") === "1";
+
+// ?notiles=drive1,drive3 suppresses the photorealistic tileset on those legs
+// without editing itinerary.js. ?notiles=all suppresses it everywhere, which is
+// the decisive test for "is the grey coming from the tileset at all?" — if grey
+// still appears with the tileset globally off, it is the globe or something
+// else entirely and no amount of tileset tuning will touch it.
+const NO_TILES_LEGS = (new URLSearchParams(location.search).get("notiles") || "")
+  .split(",").map((x) => x.trim()).filter(Boolean);
+function legHidesPhotoTiles(leg) {
+  return !!leg.hidePhotoTiles || NO_TILES_LEGS.includes("all") || NO_TILES_LEGS.includes(leg.id);
+}
 
 // ---- Tile quality profiles ------------------------------------------------
 // Every one of these settings was tightened to survive running out of memory,
@@ -565,8 +645,13 @@ function applyBaseImageryStyle(layer, style) {
 // Builds a fresh photorealistic tileset. Factored out because the tileset has
 // to be RECREATED periodically — see recyclePhotoTilesetIfNeeded().
 function createPhotoTileset(extraOptions = {}) {
+  // 1.138 signature: the first argument is an apiOptions OBJECT, not a bare
+  // key string as in 1.121. Passing the raw key here silently yields no key at
+  // all and the tileset fails to authenticate. onlyUsingWithGoogleGeocoder
+  // suppresses a one-time console warning; this app disables the geocoder
+  // entirely, so the restriction it refers to cannot be violated.
   return Promise.resolve(Cesium.createGooglePhotorealistic3DTileset(
-    GOOGLE_MAPS_API_KEY,
+    { key: GOOGLE_MAPS_API_KEY, onlyUsingWithGoogleGeocoder: true },
     {
       // cacheBytes bounds tile CONTENT (geometry and textures). It does not
       // bound the tile TREE — see recyclePhotoTilesetIfNeeded() for why that
@@ -603,7 +688,21 @@ function createPhotoTileset(extraOptions = {}) {
       // the camera creeps in wall-clock terms and there is ample time for a
       // request to complete; culling aggressively here discards fetches that
       // would have landed, and was part of why tiles never resolved fully.
-      cullRequestsWhileMoving: true,
+      // OFF by default. Cesium's description is literally the symptom:
+      // "Don't request tiles that will likely be unused when they come back
+      // because of the camera's movement." For a camera driving forward, the
+      // tiles predicted to be unused on arrival are the ones BEHIND it — so
+      // their requests are never issued, and ground that looked fine while
+      // being approached is never re-loaded once passed.
+      //
+      // The premise is that a request will arrive too late to be worth making.
+      // That premise is false for this app: recording runs at ~0.025x, so the
+      // camera creeps in wall-clock terms and there is ample time for anything
+      // requested to arrive and be used. The optimisation is trading exactly
+      // the pixels behind the vehicle for a saving that is not needed.
+      //
+      // ?cullmoving=1 restores it, for comparison.
+      cullRequestsWhileMoving: CULL_REQUESTS_WHILE_MOVING,
       cullRequestsWhileMovingMultiplier: QUALITY.cullRequestsWhileMovingMultiplier,
 
       // Cesium's default, stated explicitly as a warning: this must NOT be
@@ -718,7 +817,7 @@ async function recyclePhotoTilesetIfNeeded() {
 
     // Respect the current leg's suppression rather than forcing visible — a
     // recycle on a hidePhotoTiles leg would otherwise pop the tileset back on.
-    fresh.show = !findLegAt(simSeconds).hidePhotoTiles;
+    fresh.show = !legHidesPhotoTiles(findLegAt(simSeconds));
     fresh.preloadWhenHidden = false;
     photoTileset = fresh;
     // A recycled tileset is built from the CONSTRUCTOR defaults, so it does not
@@ -770,6 +869,7 @@ async function setupTerrainAndBuildings() {
     if (source) {
       baseLayer = mainViewer.imageryLayers.addImageryProvider(source.create());
       baseSource = name;
+      window.__baseMaxLevel = IMAGERY_MAX_LEVEL;
       Object.assign(BASE_IMAGERY_STYLE, source.globeStyle);
     } else {
       const summary = results.map((r) => `${r.name}: ${r.detail}`).join(" · ");
@@ -1528,6 +1628,19 @@ const CAMERA_PROFILES = {
   // desert, mid-ocean, rural stretches — where a 48km view costs nothing
   // because there is nothing out there to load.
   vista: { fovDeg: 60, farM: null, sseBase: 16, foveate: true, foveatedConeSize: 0.55, driveRange: 475 },
+  // For legs with no usable photogrammetry, where the satellite globe IS the
+  // shot. Satellite imagery cannot look sharp from a 215m chase camera: the
+  // nearest ground is ~450m away, which needs 0.17 m/pixel, and Esri's deepest
+  // level anywhere is 0.26. The fix is not a better imagery level — there is
+  // no such level — it is to frame from an altitude the imagery can actually
+  // serve. At -35° and 5km the nearest ground sits ~2.7km out, needing
+  // 1.09 m/pixel, which level 17 satisfies comfortably.
+  //
+  // It also reads as a deliberate choice rather than a compromise: a high
+  // tracking shot over 300km of empty desert is a better sequence than a
+  // ground-level chase through featureless sand, and it contrasts with the
+  // close city legs instead of competing with them.
+  aerial: { fovDeg: 42, farM: null, sseBase: 16, foveate: false, foveatedConeSize: 1.0, driveRange: 5000, pitchDeg: -35 },
 };
 
 // Per-leg override wins; otherwise drive legs get the bounded lens and
@@ -1722,7 +1835,7 @@ function updateMainCamera(state, leg) {
   // is in frame, not just the ground right under the vehicle. Range bumped
   // up to compensate so ground clearance stays comfortably over 100m even
   // at the shallower angle (height above target = range * sin(|pitch|)).
-  const pitchDeg = isFlight ? -9 - state.pitchDeg * 0.3 : -14;
+  const pitchDeg = isFlight ? -9 - state.pitchDeg * 0.3 : (cameraProfileFor(leg).pitchDeg ?? -14);
   const pitch = R.toRadians(pitchDeg);
   // Drive range comes from the lens profile. 600 rather than 475 because the
   // narrower 42° lens pulled the bottom of frame in toward the vehicle: the
@@ -1838,9 +1951,9 @@ function render() {
     // empty sky with a vehicle icon floating in it. Refuse that combination
     // rather than render nothing: keep the globe, since it has coverage
     // everywhere and the tileset by definition does not.
-    const suppressTiles = !!leg.hidePhotoTiles;
+    const suppressTiles = legHidesPhotoTiles(leg);
     const suppressGlobe = !!leg.hideGlobe && !suppressTiles;
-    if (leg.hidePhotoTiles && leg.hideGlobe) {
+    if (suppressTiles && leg.hideGlobe) {
       console.warn(`Leg "${leg.id}" sets both hidePhotoTiles and hideGlobe; keeping the globe.`);
     }
     mainViewer.scene.globe.show = !(photoTileset && suppressGlobe);
@@ -2106,7 +2219,9 @@ function render() {
       `tile mem     ${photoTileset ? `${(photoTileset.totalMemoryUsageInBytes / 1048576).toFixed(0)} MB` : "-"}\n` +
       `tile tree    ${(photoTileset?.statistics?.numberOfTilesTotal ?? 0).toLocaleString()}${RECYCLE_ENABLED ? ` / ${TILE_TREE_MAX.toLocaleString()}  recycles=${tilesetRecycleCount}${recyclingTileset ? " (RECYCLING)" : ""}` : "  (recycling off)"}\n` +
       `pending req  ${photoTileset?.statistics?.numberOfPendingRequests ?? "-"}\n` +
-      `globe base   ${window.__baseSource ?? "NONE — gaps untextured"}\n` +
+      `photo tiles  ${photoTileset ? (photoTileset.show ? "VISIBLE" : "hidden (hidePhotoTiles)") : "not loaded"}\n` +
+      `globe        ${mainViewer.scene.globe.show ? "VISIBLE" : "hidden (hideGlobe)"}\n` +
+      `globe base   ${window.__baseSource ?? "NONE — gaps untextured"} · maxLevel ${window.__baseMaxLevel ?? "-"}\n` +
       `--- minimap ---\n` +
       `trail pts    ${miniTrail.length}\n` +
       `mini height  ${miniHeight?.toFixed(0) ?? "-"} m\n` +
