@@ -396,43 +396,9 @@ async function pickBasemap(order) {
 async function setupMinimapImagery() {
   miniViewer.imageryLayers.removeAll();
 
-  // Google 2D satellite first. It is the best imagery available here and it
-  // costs nothing extra: it authenticates with GoogleMaps.defaultApiKey, the
-  // same Map Tiles API key already loading the photorealistic 3D tiles.
-  //
-  // It matters because of resolution. The drive camera's nearest ground needs
-  // 0.18 m/pixel; Esri World Imagery tops out at 0.26 (level 19) and in remote
-  // desert does not reach even that, which is what produced their grey
-  // "Map data not yet available" tiles. Google 2D goes to level 22, so the
-  // ground-level chase camera can be sharp rather than needing to climb to an
-  // altitude the imagery can serve.
-  //
-  // Feature-detected: Google2DImageryProvider is not in every CesiumJS release,
-  // and index.html pins 1.121. If it is absent the chain falls through to Ion
-  // and then the probed keyless sources exactly as before.
-  if (Cesium.Google2DImageryProvider) {
-    try {
-      const provider = await Cesium.Google2DImageryProvider.fromUrl({
-        mapType: "satellite",
-        maximumLevel: GOOGLE_IMAGERY_MAX_LEVEL,
-      });
-      const layer = mainViewer.imageryLayers.addImageryProvider(provider);
-      applyBaseImageryStyle(layer, BASE_IMAGERY_STYLE);
-      window.__baseLayer = layer;
-      window.__baseSource = "google-2d-satellite";
-      window.__baseMaxLevel = GOOGLE_IMAGERY_MAX_LEVEL;
-      window.__baseProbe = [{ name: "google-2d-satellite", ok: true, detail: "Google Map Tiles API" }];
-      console.info("Globe backdrop: google-2d-satellite");
-      return;
-    } catch (e) {
-      console.warn("Google 2D imagery unavailable, falling back to Ion / keyless sources.", e);
-    }
-  } else {
-    console.info("Google2DImageryProvider not present in this CesiumJS build; skipping.");
-  }
-
-  // Ion World Imagery next when the token actually works. Unlike the probed
-  // sources this one rejects on failure, so a try/catch is sufficient.
+  // Ion World Imagery first when the token actually works — sharpest option,
+  // no third-party host. Unlike the probed sources this one rejects on
+  // failure, so a try/catch is sufficient.
   try {
     const provider = await Cesium.createWorldImageryAsync();
     const layer = miniViewer.imageryLayers.addImageryProvider(provider);
@@ -502,6 +468,9 @@ const SKIP_LEVEL_OF_DETAIL = new URLSearchParams(location.search).get("skiplod")
 // See the note at the tileset options: this is the prime suspect for tiles
 // vanishing once the vehicle passes them, and it is off unless asked for.
 const CULL_REQUESTS_WHILE_MOVING = new URLSearchParams(location.search).get("cullmoving") === "1";
+// Read here rather than from document.body.classList: boot() adds the "debug"
+// class only AFTER setupTerrainAndBuildings has already run.
+const DEBUG_MODE = new URLSearchParams(location.search).has("debug");
 
 // ?notiles=drive1,drive3 suppresses the photorealistic tileset on those legs
 // without editing itinerary.js. ?notiles=all suppresses it everywhere, which is
@@ -850,6 +819,59 @@ async function setupTerrainAndBuildings() {
       console.warn("World terrain unavailable, using flat ellipsoid.", e);
       showNotice("Cesium World Terrain unavailable — gaps in photorealistic coverage will render flat.", e);
     }
+  }
+
+  // Google 2D satellite first. It is the best imagery available here and it
+  // costs nothing extra: it authenticates with GoogleMaps.defaultApiKey, the
+  // same Map Tiles API key already loading the photorealistic 3D tiles.
+  //
+  // It matters because of resolution. The drive camera's nearest ground needs
+  // 0.18 m/pixel; Esri World Imagery tops out at 0.26 (level 19) and in remote
+  // desert does not reach even that, which is what produced their grey
+  // "Map data not yet available" tiles. Google 2D goes to level 22, so the
+  // ground-level chase camera can be sharp rather than needing to climb to an
+  // altitude the imagery can serve.
+  //
+  // Feature-detected: Google2DImageryProvider is not in every CesiumJS release,
+  // and index.html pins 1.121. If it is absent the chain falls through to Ion
+  // and then the probed keyless sources exactly as before.
+  if (Cesium.Google2DImageryProvider) {
+    try {
+      // key passed explicitly rather than relying on GoogleMaps.defaultApiKey.
+      // The default is read at call time, and depending on module evaluation
+      // order that global may not be the one this app set.
+      const provider = await Cesium.Google2DImageryProvider.fromUrl({
+        key: GOOGLE_MAPS_API_KEY,
+        mapType: "satellite",
+        maximumLevel: GOOGLE_IMAGERY_MAX_LEVEL,
+      });
+      const layer = mainViewer.imageryLayers.addImageryProvider(provider);
+      applyBaseImageryStyle(layer, BASE_IMAGERY_STYLE);
+      window.__baseLayer = layer;
+      window.__baseSource = "google-2d-satellite";
+      window.__baseMaxLevel = GOOGLE_IMAGERY_MAX_LEVEL;
+      window.__baseProbe = [{ name: "google-2d-satellite", ok: true, detail: "Google Map Tiles API" }];
+      console.info("Globe backdrop: google-2d-satellite");
+      // Success is diagnostic only — it would otherwise sit in the top of every
+      // recorded frame for nine seconds. Failures still notify unconditionally,
+      // because those change what the viewer actually sees.
+      if (DEBUG_MODE) {
+        showNotice(`Globe backdrop: Google 2D satellite (Cesium ${Cesium.VERSION}, maxLevel ${GOOGLE_IMAGERY_MAX_LEVEL}).`);
+      }
+      return;
+    } catch (e) {
+      // On screen, not just the console. Which basemap actually won decides
+      // whether the desert renders sharp or grey, and it has been invisible.
+      // Kept on a global as well as logged: the on-screen notice auto-dismisses
+      // after 9s, and this is the one error worth being able to read later.
+      // Inspect with __baseError in the console.
+      window.__baseError = e;
+      console.warn("Google 2D imagery unavailable, falling back to Ion / keyless sources.", e);
+      showNotice("Google 2D satellite REJECTED — falling back to Esri, which has no high-zoom imagery over desert.", e);
+    }
+  } else {
+    console.info("Google2DImageryProvider not present in this CesiumJS build; skipping.");
+    showNotice(`Google2DImageryProvider is missing from CesiumJS ${Cesium.VERSION} — falling back to Esri.`);
   }
 
   // Gap-filling backdrop. Ion World Imagery when the token works, otherwise
