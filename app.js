@@ -14,6 +14,20 @@ import { applyFlagSwatch } from "./flags.js";
 Cesium.Ion.defaultAccessToken = ION_ACCESS_TOKEN;
 Cesium.GoogleMaps.defaultApiKey = GOOGLE_MAPS_API_KEY;
 
+// Throttle concurrent requests to Google. The photorealistic 3D tiles and the
+// 2D satellite basemap bill to the SAME Map Tiles API quota, so the two compete
+// — and Cesium will happily open six connections per host and burst hard enough
+// to draw HTTP 429 (Too Many Requests). A 429 does not degrade gracefully the
+// way a 404 does: 404 falls back to the parent tile, while 429 means the whole
+// basemap simply never arrives and the globe renders as bare baseColor.
+//
+// Fewer concurrent requests is slower per tile but finishes more of them.
+// Recording runs at ~0.025x, so there is time to spare and nothing to gain from
+// bursting. Tune with ?reqs=N.
+const reqsParam = parseInt(new URLSearchParams(location.search).get("reqs"), 10);
+Cesium.RequestScheduler.maximumRequestsPerServer =
+  Number.isFinite(reqsParam) && reqsParam > 0 ? reqsParam : 3;
+
 // ---- On-screen error banner ------------------------------------------------
 // Registered before anything else runs so it catches viewer-construction
 // failures too. If something throws silently (a bad model, a rejected
@@ -310,7 +324,12 @@ const BASEMAP_SOURCES = {
     // scheme puts row before column, unlike every other entry here.
     probe: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/4/6/8",
     miniStyle: { brightness: 0.55, contrast: 1.2, saturation: 0.35 },
-    globeStyle: { brightness: 1.05, contrast: 1.0, saturation: 0.70, gamma: 1.10, hue: 0.0 },
+    // No styling. Every attempt to tune this — first to make the globe recede
+    // beneath photogrammetry, then to put bite back in once it became the
+    // primary surface — read as washed out. Esri's own colour balance is what
+    // it was authored for, so leave it alone. null means "do not touch the
+    // layer at all", not "apply neutral values".
+    globeStyle: null,
     create: () => new Cesium.UrlTemplateImageryProvider({
       url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       credit: new Cesium.Credit("Esri, Maxar, Earthstar Geographics"),
@@ -396,23 +415,12 @@ async function pickBasemap(order) {
 async function setupMinimapImagery() {
   miniViewer.imageryLayers.removeAll();
 
-  // Ion World Imagery first when the token actually works — sharpest option,
-  // no third-party host. Unlike the probed sources this one rejects on
-  // failure, so a try/catch is sufficient.
-  try {
-    const provider = await Cesium.createWorldImageryAsync();
-    const layer = miniViewer.imageryLayers.addImageryProvider(provider);
-    window.__miniBaseBrightness = 0.55;
-    layer.brightness = 0.55 * MINIMAP_BRIGHTNESS; layer.contrast = 1.2; layer.saturation = 0.35;
-    window.__miniLayer = layer;
-    window.__miniSource = "ion-world-imagery";
-    window.__miniProbe = [{ name: "ion-world-imagery", ok: true, detail: "asset 2 OK" }];
-    console.info("Minimap basemap: ion-world-imagery");
-    return;
-  } catch (e) {
-    console.warn("Ion World Imagery unavailable for minimap, probing no-auth basemaps.", e);
-  }
-
+  // NO Ion World Imagery here, deliberately. It used to be first in this chain
+  // and lost every race only because the Ion token was invalid; the moment that
+  // token was fixed, satellite imagery silently replaced the dark cartographic
+  // basemap. This is a stylised seatback route map — landmasses, coastlines and
+  // a bright trail — and satellite detail is both wrong for that and heavier to
+  // stream for a panel a few hundred pixels wide. Cartography first, always.
   const { name, source, results } = await pickBasemap(MINIMAP_BASEMAP_ORDER);
   window.__miniProbe = results;
   window.__miniSource = name;
@@ -604,6 +612,11 @@ const BASE_IMAGERY_STYLE = {
 };
 
 function applyBaseImageryStyle(layer, style) {
+  // A source with globeStyle null keeps the provider's own colour balance.
+  // Writing "neutral" values is not the same thing as not writing them —
+  // it commits to Cesium's defaults being neutral for every property, which
+  // is a claim worth not making when the provider already looks right.
+  if (!style) return;
   layer.brightness = style.brightness;
   layer.saturation = style.saturation;
   layer.gamma = style.gamma;
@@ -811,7 +824,13 @@ async function recyclePhotoTilesetIfNeeded() {
   }
 }
 
-async function setupTerrainAndBuildings() {
+// Chooses and installs the globe's basemap. Extracted into its own function
+// because the chain returns early as soon as a source succeeds — and when
+// that code lived inline in setupTerrainAndBuildings, the first successful
+// return skipped the photorealistic tileset creation below it entirely.
+// The app ran with no 3D tiles anywhere and the fault was invisible,
+// because a missing tileset looks exactly like a coverage gap.
+async function setupGlobeBasemap() {
   if (GLOBE_USES_3D_TERRAIN) {
     try {
       mainViewer.terrainProvider = await Cesium.createWorldTerrainAsync();
@@ -835,7 +854,20 @@ async function setupTerrainAndBuildings() {
   // Feature-detected: Google2DImageryProvider is not in every CesiumJS release,
   // and index.html pins 1.121. If it is absent the chain falls through to Ion
   // and then the probed keyless sources exactly as before.
-  if (Cesium.Google2DImageryProvider) {
+  // ?globebase=esri  forces the keyless chain and skips Google entirely.
+  //
+  // Worth having because Google's 2D imagery and the photorealistic 3D tiles
+  // share one Map Tiles API quota, and the 3D tiles are what actually carry the
+  // visualisation. Spending quota on a satellite backdrop for empty desert is
+  // the wrong trade — and exhausting it takes BOTH down, since a 429 is refused
+  // outright rather than falling back the way a 404 does.
+  //
+  // Esri is free and unlimited, and its grey-placeholder problem only begins
+  // above level 18, so ?globebase=esri&imglevel=18 gives a clean backdrop at no
+  // quota cost. Slightly softer than Google, and it keeps the whole budget for
+  // the photogrammetry.
+  const forceEsri = new URLSearchParams(location.search).get("globebase") === "esri";
+  if (!forceEsri && Cesium.Google2DImageryProvider) {
     try {
       // key passed explicitly rather than relying on GoogleMaps.defaultApiKey.
       // The default is read at call time, and depending on module evaluation
@@ -862,6 +894,12 @@ async function setupTerrainAndBuildings() {
           });
           if (window.__baseTileErrors.length === 1) {
             console.warn("First Google 2D tile failure (see __baseTileErrors for all):", err);
+            const status = err?.statusCode ?? err?.error?.statusCode;
+            // 429 is worth interrupting for: it means the basemap will not
+            // appear at all, and no amount of code changes will fix it.
+            if (status === 429) {
+              showNotice("Google Map Tiles API returned 429 (rate limited) — the satellite basemap will not load. This is a quota limit, not a bug. Check quotas in Google Cloud Console.");
+            }
           }
         });
       }
@@ -910,8 +948,9 @@ async function setupTerrainAndBuildings() {
     if (source) {
       baseLayer = mainViewer.imageryLayers.addImageryProvider(source.create());
       baseSource = name;
+      window.__baseStyled = !!source.globeStyle;
       window.__baseMaxLevel = IMAGERY_MAX_LEVEL;
-      Object.assign(BASE_IMAGERY_STYLE, source.globeStyle);
+      if (source.globeStyle) Object.assign(BASE_IMAGERY_STYLE, source.globeStyle);
     } else {
       const summary = results.map((r) => `${r.name}: ${r.detail}`).join(" · ");
       console.error("No globe basemap reachable.", results);
@@ -919,11 +958,16 @@ async function setupTerrainAndBuildings() {
     }
   }
   if (baseLayer) {
-    applyBaseImageryStyle(baseLayer, BASE_IMAGERY_STYLE);
+    if (window.__baseStyled !== false) applyBaseImageryStyle(baseLayer, BASE_IMAGERY_STYLE);
     window.__baseLayer = baseLayer;
     window.__baseSource = baseSource;
     console.info(`Globe backdrop: ${baseSource}`);
   }
+
+}
+
+async function setupTerrainAndBuildings() {
+  await setupGlobeBasemap();
 
   if (!USE_PHOTOREALISTIC_TILES) return;
   try {
