@@ -52,7 +52,9 @@ export const LEGS = [
     countryCode: "KW",
     startUTC: "2026-07-26T11:00:00Z",
     endUTC: "2026-07-26T13:00:00Z",
-    simDuration: 14,
+    // 106km. Slightly under pace on purpose: this is the opening
+    // drive and it carries a photo memory that needs room to read.
+    simDuration: 11,
     cameraStyle: "chase",
     speedOverride: { value: 120, unit: "km/h" },
     photoAt: { src: "assets/kuwait.jpg", caption: "Leaving Rawda, Kuwait", triggerFrac: 0.35 },
@@ -142,6 +144,20 @@ export const LEGS = [
     // This is the real facility, geocoded by name: منفذ الخفجي الحدودي
     // (Khafji Border Crossing/Outlet), confirmed via OpenStreetMap.
     id: "border1",
+    // Google returns their "Map data not yet available" placeholder here at
+    // EVERY level of detail, not just fine ones — which is why sweeping the
+    // ?sse parameter changed nothing. It is not an LOD mismatch; there is
+    // simply no photogrammetry over this stretch of desert.
+    //
+    // It looked fine ahead and grey behind because distance was doing the
+    // hiding: far placeholders had not loaded yet so the Esri globe showed
+    // through, and as the vehicle closed on them they loaded and occluded
+    // it. Passing the ground did not remove tiles, it revealed them.
+    //
+    // Dropping the tileset lets the satellite backdrop render uninterrupted.
+    // Over flat desert that is the better shot anyway — there is no relief
+    // for photogrammetry to show, and Dammam itself is covered by drive3.
+    hidePhotoTiles: true,
     type: "transfer",
     vehicle: "van",
     label: "Border Crossing",
@@ -161,6 +177,20 @@ export const LEGS = [
   },
   {
     id: "drive2",
+    // Google returns their "Map data not yet available" placeholder here at
+    // EVERY level of detail, not just fine ones — which is why sweeping the
+    // ?sse parameter changed nothing. It is not an LOD mismatch; there is
+    // simply no photogrammetry over this stretch of desert.
+    //
+    // It looked fine ahead and grey behind because distance was doing the
+    // hiding: far placeholders had not loaded yet so the Esri globe showed
+    // through, and as the vehicle closed on them they loaded and occluded
+    // it. Passing the ground did not remove tiles, it revealed them.
+    //
+    // Dropping the tileset lets the satellite backdrop render uninterrupted.
+    // Over flat desert that is the better shot anyway — there is no relief
+    // for photogrammetry to show, and Dammam itself is covered by drive3.
+    hidePhotoTiles: true,
     // Google photogrammetry over open Gulf desert does not go to street
     // level. Requesting a fine level of detail here returns their
     // "Map data not yet available" placeholder — opaque grey geometry
@@ -179,7 +209,10 @@ export const LEGS = [
     countryCode: "SA",
     startUTC: "2026-07-26T13:30:00Z",
     endUTC: "2026-07-26T17:00:00Z",
-    simDuration: 12,
+    // 303km at 10.5 km/s. Was 12s, which ran this leg at 25.3 km/s —
+    // over three times every other drive, and read as the car suddenly
+    // accelerating for no reason.
+    simDuration: 29,
     cameraStyle: "chase",
     speedOverride: { value: 120, unit: "km/h" },
     // Road-snapped via OSRM — real Route 95 south along the coast to Dammam.
@@ -311,6 +344,10 @@ export const LEGS = [
     countryCode: "SA",
     startUTC: "2026-07-27T14:00:00Z",
     endUTC: "2026-07-27T15:00:00Z",
+    // 38km. The only leg deliberately off pace, at 6.3 km/s: the
+    // uniform figure would be 3.7s, too brief for the chapter card and
+    // airport POI to register. Short leg, so the slower feel reads as
+    // arriving rather than as inconsistency.
     simDuration: 6,
     cameraStyle: "chase",
     speedOverride: { value: 120, unit: "km/h" },
@@ -719,7 +756,8 @@ export const LEGS = [
     countryCode: "US",
     startUTC: "2026-07-28T16:30:00Z",
     endUTC: "2026-07-28T20:30:00Z",
-    simDuration: 18,
+    // 157km at 10.5 km/s.
+    simDuration: 15,
     cameraStyle: "chase",
     speedOverride: { value: 70, unit: "mph" },
     trafficSlowdowns: [[0.05, 0.22], [0.30, 0.40]], // fractions along leg with heavier traffic (slower camera/vehicle cadence)
@@ -894,7 +932,9 @@ export const LEGS = [
     },
     startUTC: "2026-07-30T16:00:00Z",
     endUTC: "2026-07-30T19:00:00Z",
-    simDuration: 15,
+    // 255km at 10.2 km/s. Was 15s = 17.0 km/s, the second worst
+    // offender after drive2.
+    simDuration: 25,
     cameraStyle: "chase",
     speedOverride: { value: 70, unit: "mph" },
     // Road-snapped via OSRM, elevation from the real USGS Elevation Point
