@@ -716,7 +716,9 @@ async function recyclePhotoTilesetIfNeeded() {
       await new Promise((r) => setTimeout(r, 100));
     }
 
-    fresh.show = true;
+    // Respect the current leg's suppression rather than forcing visible — a
+    // recycle on a hidePhotoTiles leg would otherwise pop the tileset back on.
+    fresh.show = !findLegAt(simSeconds).hidePhotoTiles;
     fresh.preloadWhenHidden = false;
     photoTileset = fresh;
     // A recycled tileset is built from the CONSTRUCTOR defaults, so it does not
@@ -1562,7 +1564,14 @@ const SSE_REF_ALTITUDE_M = 500;  // at or below this, use the profile's base
 const SSE_MAX = 128;             // ceiling; past here detail is meaningless
 let currentSSE = null;
 
+// ?sse=N forces one screen-space error everywhere, bypassing profiles and
+// per-leg overrides. Purely a tuning aid: finding the coarsest level Google
+// actually holds in a sparse region is a search, and doing it by editing
+// itinerary.js and rebuilding is far slower than reloading with a new number.
+const SSE_FORCED = parseFloat(new URLSearchParams(location.search).get("sse"));
+
 function targetSSEFor(state, leg) {
+  if (Number.isFinite(SSE_FORCED) && SSE_FORCED > 0) return SSE_FORCED;
   // leg.sseOverride wins over the lens profile's base. Its purpose is coverage,
   // not performance: where Google's photogrammetry does not extend to street
   // level — open desert, most of the Gulf — asking for a fine level of detail
@@ -1825,7 +1834,26 @@ function render() {
     // Per-leg data rather than runtime coverage detection: the route is
     // fixed, and there's no coverage API worth polling 60 times a second to
     // rediscover something the itinerary can simply state.
-    mainViewer.scene.globe.show = !(photoTileset && leg.hideGlobe);
+    // Both flags on one leg would hide the tileset AND the globe, leaving an
+    // empty sky with a vehicle icon floating in it. Refuse that combination
+    // rather than render nothing: keep the globe, since it has coverage
+    // everywhere and the tileset by definition does not.
+    const suppressTiles = !!leg.hidePhotoTiles;
+    const suppressGlobe = !!leg.hideGlobe && !suppressTiles;
+    if (leg.hidePhotoTiles && leg.hideGlobe) {
+      console.warn(`Leg "${leg.id}" sets both hidePhotoTiles and hideGlobe; keeping the globe.`);
+    }
+    mainViewer.scene.globe.show = !(photoTileset && suppressGlobe);
+    // hidePhotoTiles is the fallback for regions where Google's coverage is so
+    // patchy that no screen-space error avoids their "Map data not yet
+    // available" placeholders. Those placeholders are opaque geometry, so they
+    // occlude the satellite backdrop rather than degrading to it — the ground
+    // behind the vehicle turns grey instead of turning into imagery. Dropping
+    // the tileset for such a leg lets the Esri globe render uninterrupted,
+    // which reads as a consistent aerial view instead of real photogrammetry
+    // punched through with grey holes. Trades 3D for consistency, and is only
+    // worth it where the holes dominate.
+    if (photoTileset) photoTileset.show = !suppressTiles;
     // Force the tile cache back down to cacheBytes at every leg boundary.
     // Cesium only trims when it needs room, so on a continuous one-way route
     // the cache sits pinned at its ceiling holding cities we will never fly
