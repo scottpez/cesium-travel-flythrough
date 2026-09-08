@@ -34,6 +34,13 @@ export const LEGS = [
   // ------------------------------------------------------------------ DAY 1
   {
     id: "drive1",
+    // Google photogrammetry over open Gulf desert does not go to street
+    // level. Requesting a fine level of detail here returns their
+    // "Map data not yet available" placeholder — opaque grey geometry
+    // that hides the satellite backdrop beneath it. Asking for a
+    // coarser level Google actually holds returns real imagery instead.
+    // Lower this number for sharper tiles; raise it if grey reappears.
+    sseOverride: 32,
     type: "drive",
     vehicle: "van",
     label: "Rawda, Kuwait",
@@ -154,11 +161,14 @@ export const LEGS = [
   },
   {
     id: "drive2",
+    // Google photogrammetry over open Gulf desert does not go to street
+    // level. Requesting a fine level of detail here returns their
+    // "Map data not yet available" placeholder — opaque grey geometry
+    // that hides the satellite backdrop beneath it. Asking for a
+    // coarser level Google actually holds returns real imagery instead.
+    // Lower this number for sharper tiles; raise it if grey reappears.
+    sseOverride: 32,
     // Open desert between Kuwait and Dammam. Google photorealistic coverage
-    // out here is thin to absent, so a 48km vista costs almost nothing to
-    // load — this is exactly where the wide lens is free. Switch to "tight"
-    // if this leg ever turns out to be denser than expected.
-    cameraProfile: "vista",
     type: "drive",
     vehicle: "van",
     label: "Drive to Dammam",
@@ -285,6 +295,13 @@ export const LEGS = [
   // ------------------------------------------------------------------ DAY 2
   {
     id: "drive3",
+    // Google photogrammetry over open Gulf desert does not go to street
+    // level. Requesting a fine level of detail here returns their
+    // "Map data not yet available" placeholder — opaque grey geometry
+    // that hides the satellite backdrop beneath it. Asking for a
+    // coarser level Google actually holds returns real imagery instead.
+    // Lower this number for sharper tiles; raise it if grey reappears.
+    sseOverride: 32,
     type: "drive",
     vehicle: "van",
     label: "Drive to Dammam Airport",
@@ -857,9 +874,6 @@ export const LEGS = [
   // ------------------------------------------------------------------ DAY 5
   {
     id: "drive5",
-    // Rural Pennsylvania: ridge-and-valley country, sparse photogrammetry,
-    // and the long views are the whole point of the leg. Wide lens.
-    cameraProfile: "vista",
     type: "drive",
     vehicle: "minivan",
     label: "Stroudsburg → State College",

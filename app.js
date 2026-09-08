@@ -643,8 +643,34 @@ function createPhotoTileset(extraOptions = {}) {
 // invisible. Only once it is loaded does it become visible and the old one get
 // destroyed. No blank frame, and no interval where two tilesets draw the same
 // geometry and z-fight.
+// DISABLED BY DEFAULT. Enable with ?recycle=1.
+//
+// This was built on the theory that the tile TREE was consuming the heap,
+// inferred from a capture showing 1.73M tiles alongside a 4054MB heap. A later
+// capture disproved it:
+//
+//     tile tree    83,982 tiles   -> ~196 MB of tile objects
+//     tile mem     231 MB
+//     js heap      3863 MB        -> ~3.4 GB unaccounted for
+//     recycles     64  (RECYCLING)
+//
+// Twenty times fewer tiles at essentially the same heap. The original figure
+// was correlation, not causation.
+//
+// Worse, the heap trigger made it self-perpetuating: it fires at 72%, fails to
+// reduce the heap because the heap is not the tile tree, and fires again —
+// adding a whole tileset each time while the old ones evidently are not being
+// collected. 64 recycles in a single leg. It became the leak it was written to
+// prevent, and it is also the cause of the blank-screen swaps.
+//
+// Left in place rather than deleted because destroying and rebuilding the
+// tileset is still the only way to drop a tree that HAS grown too large; it
+// just must not be driven by a signal it cannot move.
+const RECYCLE_ENABLED = new URLSearchParams(location.search).get("recycle") === "1";
 const TILE_TREE_MAX = 1100000;     // ~2.6GB of tile objects
-const HEAP_FRACTION_MAX = 0.72;    // or when the heap is genuinely close to its ceiling
+// Deliberately not a heap-fraction trigger any more — see above. Tile count is
+// something recycling can actually reduce; heap fraction is not.
+const HEAP_FRACTION_MAX = Infinity;
 // The old tileset keeps rendering while the replacement preloads, so a long
 // window here is invisible to the viewer and simply buys a clean swap.
 const RECYCLE_PRELOAD_MAX_MS = 30000;
@@ -661,7 +687,7 @@ function heapFraction() {
 }
 
 async function recyclePhotoTilesetIfNeeded() {
-  if (recyclingTileset || !photoTileset || !USE_PHOTOREALISTIC_TILES) return;
+  if (!RECYCLE_ENABLED || recyclingTileset || !photoTileset || !USE_PHOTOREALISTIC_TILES) return;
   if (photoTileCount() < TILE_TREE_MAX && heapFraction() < HEAP_FRACTION_MAX) return;
 
   recyclingTileset = true;
@@ -1537,7 +1563,15 @@ const SSE_MAX = 128;             // ceiling; past here detail is meaningless
 let currentSSE = null;
 
 function targetSSEFor(state, leg) {
-  const base = cameraProfileFor(leg).sseBase;
+  // leg.sseOverride wins over the lens profile's base. Its purpose is coverage,
+  // not performance: where Google's photogrammetry does not extend to street
+  // level — open desert, most of the Gulf — asking for a fine level of detail
+  // returns their "Map data not yet available" placeholder tile rather than
+  // nothing. Those placeholders are real geometry, so they OCCLUDE the globe
+  // backdrop underneath and read as the ground blanking out right beneath the
+  // vehicle, worst in the near field where the finest detail is demanded.
+  // Requesting a coarser level that Google actually has returns real imagery.
+  const base = leg.sseOverride ?? cameraProfileFor(leg).sseBase;
   const alt = Math.max(state.height, 0);
   if (alt <= SSE_REF_ALTITUDE_M) return base;
   return Math.min(base * (alt / SSE_REF_ALTITUDE_M), SSE_MAX);
@@ -2042,7 +2076,7 @@ function render() {
         ? `${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)}/${(performance.memory.jsHeapSizeLimit / 1048576).toFixed(0)} MB`
         : "n/a (non-Chrome)"}\n` +
       `tile mem     ${photoTileset ? `${(photoTileset.totalMemoryUsageInBytes / 1048576).toFixed(0)} MB` : "-"}\n` +
-      `tile tree    ${(photoTileset?.statistics?.numberOfTilesTotal ?? 0).toLocaleString()} / ${TILE_TREE_MAX.toLocaleString()}  recycles=${tilesetRecycleCount}${recyclingTileset ? " (RECYCLING)" : ""}\n` +
+      `tile tree    ${(photoTileset?.statistics?.numberOfTilesTotal ?? 0).toLocaleString()}${RECYCLE_ENABLED ? ` / ${TILE_TREE_MAX.toLocaleString()}  recycles=${tilesetRecycleCount}${recyclingTileset ? " (RECYCLING)" : ""}` : "  (recycling off)"}\n` +
       `pending req  ${photoTileset?.statistics?.numberOfPendingRequests ?? "-"}\n` +
       `globe base   ${window.__baseSource ?? "NONE — gaps untextured"}\n` +
       `--- minimap ---\n` +
