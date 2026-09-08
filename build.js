@@ -21,6 +21,7 @@ const EXCLUDED_NAMES = new Set([
   "package-lock.json",
   "__pycache__",     // Python bytecode from devserver.py
   "devserver.py",    // local dev server, not part of the deployed site
+  "record-chrome.bat", // Windows launcher for recording, not web content
   // Local Cesium 1.138 download (11MB). index.html loads 1.121 from the Cesium
   // CDN, so nothing here is ever requested. Stays in the repo; just not shipped.
   "cesiumjs",

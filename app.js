@@ -411,7 +411,28 @@ let photoTileset = null;
 
 // LOD skipping: fast descents, but visible popping as tiles swap levels.
 // See the note at the tileset options for the trade.
-const SKIP_LEVEL_OF_DETAIL = false;
+// Skip-LOD lets the traversal jump straight to the tiles that meet the error
+// budget instead of refining through every intermediate level. Cesium's own
+// documented companion settings are baseScreenSpaceError 1024,
+// skipScreenSpaceErrorFactor 16, skipLevels 1 — used below when enabled.
+//
+// OFF by default, on purpose. Two reasons:
+//
+// 1. It is a CONTENT-loading optimisation. Cesium documents it as controlling
+//    which tiles get downloaded and rendered during traversal; nothing in the
+//    API suggests it prunes the tile TREE, and the tree is what exhausts the
+//    heap here. Its savings land in the GPU pool, which was measured at 1023MB
+//    against a 1GB budget — the pool that was never the problem.
+// 2. It is the classic cause of LOD popping: a coarse tile is shown and then
+//    replaced by a much finer one with no intermediate step. It was enabled
+//    when the visualisation was described as flickering badly, and turning it
+//    off was part of that fix.
+//
+// Testable without a rebuild via ?skiplod=1, because point 1 is inference from
+// the docs rather than something measured on this tileset — if it turns out to
+// cut the tile tree, that is worth knowing and the flag makes it one reload to
+// find out. Watch `tile tree` in ?debug with and without.
+const SKIP_LEVEL_OF_DETAIL = new URLSearchParams(location.search).get("skiplod") === "1";
 
 // ---- Tile quality profiles ------------------------------------------------
 // Every one of these settings was tightened to survive running out of memory,
@@ -554,13 +575,45 @@ function createPhotoTileset(extraOptions = {}) {
       maximumCacheOverflowBytes: QUALITY.maximumCacheOverflowBytes,
       maximumScreenSpaceError: QUALITY.maximumScreenSpaceError,
       skipLevelOfDetail: SKIP_LEVEL_OF_DETAIL,
+      // Inert unless skipLevelOfDetail is true; Cesium's documented defaults
+      // for the optimisation.
+      ...(SKIP_LEVEL_OF_DETAIL
+        ? { baseScreenSpaceError: 1024, skipScreenSpaceErrorFactor: 16, skipLevels: 1 }
+        : {}),
       progressiveResolutionHeightFraction: QUALITY.progressiveResolutionHeightFraction,
       dynamicScreenSpaceError: QUALITY.dynamicScreenSpaceError,
       dynamicScreenSpaceErrorFactor: QUALITY.dynamicScreenSpaceErrorFactor,
       dynamicScreenSpaceErrorDensity: QUALITY.dynamicScreenSpaceErrorDensity,
       foveatedScreenSpaceError: QUALITY.foveatedScreenSpaceError,
+      // Frustum culling. Already Cesium's default, set explicitly because it
+      // is one of the few options that genuinely reduces TILE-TREE growth
+      // rather than just content loading: a subtree culled during traversal is
+      // never descended into, so its nodes are never instantiated. That is the
+      // same mechanism the narrow drive lens exploits — cutting the frustum
+      // cut the tree, not just the draw call count.
+      cullWithChildrenBounds: true,
+
+      // Don't request tiles the camera will have moved past before they
+      // arrive. Note Cesium's caveat: "This optimization only applies to
+      // stationary tilesets" — that means the TILESET, not the camera. Google's
+      // is stationary, so it applies.
+      //
+      // The multiplier matters far more than the boolean, and it is set LOW
+      // (30 vs the 60 default) rather than high. Recording runs at ~0.025x, so
+      // the camera creeps in wall-clock terms and there is ample time for a
+      // request to complete; culling aggressively here discards fetches that
+      // would have landed, and was part of why tiles never resolved fully.
       cullRequestsWhileMoving: true,
       cullRequestsWhileMovingMultiplier: QUALITY.cullRequestsWhileMovingMultiplier,
+
+      // Cesium's default, stated explicitly as a warning: this must NOT be
+      // blanket-forced to false. recyclePhotoTilesetIfNeeded() creates the
+      // replacement tileset with preloadWhenHidden:true precisely so it can
+      // stream the current view while invisible, then flips it back after the
+      // swap. Hard-coding false here would make every recycle swap in an empty
+      // tileset — the five-second blank screen that behaviour already caused
+      // once.
+      preloadWhenHidden: false,
       foveatedTimeDelay: 0.0,
       loadSiblings: false,
       ...extraOptions,
@@ -640,6 +693,15 @@ async function recyclePhotoTilesetIfNeeded() {
     fresh.show = true;
     fresh.preloadWhenHidden = false;
     photoTileset = fresh;
+    // A recycled tileset is built from the CONSTRUCTOR defaults, so it does not
+    // carry the current leg's per-leg tuning. Without this the swap silently
+    // reverts foveation to Cesium's aggressive 0.1 cone mid-drive, and leaves
+    // maximumScreenSpaceError at the profile base regardless of altitude.
+    // currentSSE is cleared so applyDynamicSSE's "only write on material
+    // change" guard cannot skip the first write against a stale comparison.
+    const legNow = findLegAt(simSeconds);
+    applyFoveation(cameraProfileFor(legNow));
+    currentSSE = null;
     // remove() destroys the primitive, which is what actually frees the tree.
     mainViewer.scene.primitives.remove(old);
     tilesetRecycleCount++;
@@ -1433,11 +1495,11 @@ let lastCameraDebug = {};
 // default.
 const CAMERA_PROFILES = {
   // Bounded lens for dense photogrammetry. No sky, ~6km of visible ground.
-  tight: { fovDeg: 42, farM: null },
+  tight: { fovDeg: 42, farM: null, sseBase: 12, foveate: false, foveatedConeSize: 1.0, driveRange: 600 },
   // Wide vista. Only affordable where coverage is sparse or absent — open
   // desert, mid-ocean, rural stretches — where a 48km view costs nothing
   // because there is nothing out there to load.
-  vista: { fovDeg: 60, farM: null },
+  vista: { fovDeg: 60, farM: null, sseBase: 16, foveate: true, foveatedConeSize: 0.55, driveRange: 475 },
 };
 
 // Per-leg override wins; otherwise drive legs get the bounded lens and
@@ -1450,11 +1512,85 @@ function cameraProfileFor(leg) {
   return CAMERA_PROFILES.vista;
 }
 
+// ---- Altitude-driven screen-space error ------------------------------------
+// Screen-space error is already distance-aware: Cesium defines it as roughly
+// the pixel width a sphere of the tile's geometric error would cover, so a
+// distant tile refines less without anyone asking. What SSE does NOT account
+// for is how much GROUND is in frame, and that is what changes with altitude:
+//
+//   drive,  camera    185m, 42 deg lens :      12 km2 in frame
+//   flight, camera  7,000m, 60 deg lens :  48,059 km2   (3,865x)
+//   flight, camera 11,500m, 60 deg lens :  77,954 km2   (6,270x)
+//
+// Each tile up there is coarser, but there are vastly more of them, and every
+// one becomes a Cesium3DTile object on the heap that is never freed. Holding a
+// single SSE across a journey spanning 0m to 11,500m therefore spends the heap
+// budget on ground the viewer cannot resolve anyway.
+//
+// Ramping SSE with altitude keeps the tile count bounded instead. On descent it
+// unwinds automatically: by the time the camera is near the ground it is asking
+// for full detail again. Note the <= guard — without it the ratio would drive
+// SSE BELOW the base at low altitude, which would demand more detail on exactly
+// the legs already under the most memory pressure.
+const SSE_REF_ALTITUDE_M = 500;  // at or below this, use the profile's base
+const SSE_MAX = 128;             // ceiling; past here detail is meaningless
+let currentSSE = null;
+
+function targetSSEFor(state, leg) {
+  const base = cameraProfileFor(leg).sseBase;
+  const alt = Math.max(state.height, 0);
+  if (alt <= SSE_REF_ALTITUDE_M) return base;
+  return Math.min(base * (alt / SSE_REF_ALTITUDE_M), SSE_MAX);
+}
+
+function applyDynamicSSE(state, leg) {
+  if (!photoTileset) return;
+  const target = targetSSEFor(state, leg);
+  // Only write on a material change. Every write invalidates the traversal's
+  // refinement decisions, so nudging it every frame would cause continuous
+  // re-evaluation and visible LOD churn for no benefit.
+  if (currentSSE !== null && Math.abs(target - currentSSE) / currentSSE < 0.1) return;
+  currentSSE = target;
+  photoTileset.maximumScreenSpaceError = target;
+}
+
 const DEFAULT_CAMERA_FAR = mainViewer.camera.frustum.far;
 let currentCameraProfileName = null;
 
+// Foveation raises screen-space error for tiles away from the centre of the
+// screen, so fewer of them refine and fewer tile objects are created. That
+// makes it one of the rare options on this list that touches the HEAP pool
+// rather than just content — but it buys that by softening the edges of frame.
+//
+// This is going out as video, so the trade differs sharply by leg type:
+//
+//   drive legs  — the money shots, and the 42° lens already bounds them to
+//                 ~12 km² of ground. There is little left for foveation to
+//                 save, and soft corners would be visible in every frame of
+//                 the most-watched footage. OFF.
+//   vista legs  — flights and stops run a 60° lens over up to 78,000 km². The
+//                 saving is real there, attention is on the vehicle at centre
+//                 frame, and the ground is distant enough that edge softness
+//                 does not read. ON, but with a generous cone.
+//
+// foveatedConeSize is the important dial and Cesium's 0.1 default is far too
+// aggressive for video — it treats ~90% of the frame as "edge". 0.55 keeps the
+// majority of the image at full quality and relaxes only the outer margin.
+// (1.0 means the cone covers the whole field of view, disabling the effect.)
+//
+// foveatedTimeDelay stays 0 everywhere. Its purpose is to defer edge tiles
+// "until the camera stops moving", and this camera never stops — any non-zero
+// value would defer the edges of frame permanently.
+function applyFoveation(p) {
+  if (!photoTileset) return;
+  photoTileset.foveatedScreenSpaceError = p.foveate;
+  photoTileset.foveatedConeSize = p.foveatedConeSize;
+  photoTileset.foveatedTimeDelay = 0.0;
+}
+
 function applyCameraProfile(leg) {
   const p = cameraProfileFor(leg);
+  applyFoveation(p);
   const frustum = mainViewer.camera.frustum;
   // Orthographic frustums have no fov; guard rather than assume perspective.
   if (frustum && frustum.fov !== undefined) frustum.fov = R.toRadians(p.fovDeg);
@@ -1545,7 +1681,22 @@ function updateMainCamera(state, leg) {
   // at the shallower angle (height above target = range * sin(|pitch|)).
   const pitchDeg = isFlight ? -9 - state.pitchDeg * 0.3 : -14;
   const pitch = R.toRadians(pitchDeg);
-  const range = isFlight ? 990 : 475; // shallower angle than before, range increased to hold clearance: driving 475*sin(14°)+55 ≈ 170m
+  // Drive range comes from the lens profile. 600 rather than 475 because the
+  // narrower 42° lens pulled the bottom of frame in toward the vehicle: the
+  // strip of ground still visible BEHIND the car dropped from 179m at the old
+  // 60° lens to 99m, so ground was leaving shot almost as soon as it passed,
+  // which reads as tiles vanishing right behind the vehicle.
+  //
+  // Pulling the camera back to 600 restores that to 162m for 1.35x the ground
+  // area — 16.8 km² against 12.4, still ~73x below the 1,234 km² framing that
+  // was crashing the tab. Note this does NOT shrink the vehicle: Cesium sizes
+  // billboards in PIXELS, so the icon holds its screen size and simply gets
+  // more ground around it.
+  //
+  // Steepening the pitch instead does not work — it raises the camera by
+  // range*sin(pitch) at the same time, and the two effects cancel almost
+  // exactly (pitch -20 yields 98m behind, no better than now).
+  const range = isFlight ? 990 : (cameraProfileFor(leg).driveRange ?? 475);
 
   mainViewer.camera.lookAt(target, new Cesium.HeadingPitchRange(heading, pitch, range));
   lastCameraDebug = { style: "chase", headingDeg: ((headingDeg % 360) + 360) % 360, travelHeadingDeg: ((R.toDegrees(state.heading) % 360) + 360) % 360, pitchDeg, targetHeight, range };
@@ -1735,6 +1886,10 @@ function render() {
     if (!name) lastStateName = null;
   }
 
+  // Retune detail for this altitude before the camera moves, so the
+  // traversal that follows uses the right error budget.
+  applyDynamicSSE(state, leg);
+
   // -- cameras --
   // flyingToStart suppresses this the same way warmingUp does: Cesium's camera
   // flight drives the camera itself from inside scene.render(), so a per-frame
@@ -1874,7 +2029,7 @@ function render() {
         const horizon = Math.sqrt(2 * 6371000 * camH + camH * camH);
         const dFar = topEl >= 0 ? horizon : Math.min(camH / Math.tan(-topEl), horizon);
         const area = 0.5 * hFov * (dFar * dFar) / 1e6;
-        return `lens         ${currentCameraProfileName ?? "-"} · ${R.toDegrees(hFov).toFixed(0)}° hFOV\n` +
+        return `lens         ${currentCameraProfileName ?? "-"} · ${R.toDegrees(hFov).toFixed(0)}° hFOV · SSE ${currentSSE ? currentSSE.toFixed(0) : "-"}\n` +
           `top of frame ${R.toDegrees(topEl) >= 0 ? "+" : ""}${R.toDegrees(topEl).toFixed(1)}°` +
           `${R.toDegrees(topEl) >= 0 ? "  ** HORIZON IN SHOT **" : ""}\n` +
           `ground ahead ${(dFar / 1000).toFixed(1)} km  (~${area.toFixed(1)} km² in frame)\n`;
