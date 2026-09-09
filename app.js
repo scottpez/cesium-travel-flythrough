@@ -14,19 +14,30 @@ import { applyFlagSwatch } from "./flags.js";
 Cesium.Ion.defaultAccessToken = ION_ACCESS_TOKEN;
 Cesium.GoogleMaps.defaultApiKey = GOOGLE_MAPS_API_KEY;
 
-// Throttle concurrent requests to Google. The photorealistic 3D tiles and the
-// 2D satellite basemap bill to the SAME Map Tiles API quota, so the two compete
-// — and Cesium will happily open six connections per host and burst hard enough
-// to draw HTTP 429 (Too Many Requests). A 429 does not degrade gracefully the
-// way a 404 does: 404 falls back to the parent tile, while 429 means the whole
-// basemap simply never arrives and the globe renders as bare baseColor.
+// Request concurrency, corrected. The previous version capped EVERY host at 3
+// simultaneous connections, reasoning that fewer concurrent requests would
+// protect the Google 2D quota from 429s. That reasoning does not hold up: the
+// 429 that actually happened occurred WITH this throttle already in place —
+// Google's quota is a requests-PER-MINUTE budget enforced server-side, and
+// browser connection concurrency barely moves that number, it mostly just
+// spreads the same total request volume over more wall-clock time. What the
+// throttle actually did was cap the PHOTOREALISTIC TILESET to 3 simultaneous
+// fetches on every leg, all the time — including dense-geometry legs like the
+// NYC drive, which is the leg reported as "not too clear". A tileset that can
+// only have 3 tiles in flight at once cannot keep up with a camera revealing
+// new buildings, however slowly that camera moves, and falls back to whatever
+// coarser tile it already has — which reads as softness, not as an error.
 //
-// Fewer concurrent requests is slower per tile but finishes more of them.
-// Recording runs at ~0.025x, so there is time to spare and nothing to gain from
-// bursting. Tune with ?reqs=N.
+// requestsByServer targets the fix at the actual host instead of every host:
+// tile.googleapis.com serves BOTH the 2D imagery and the 3D tileset, and per
+// Cesium's own documented use for this property — "useful when streaming data
+// from a known HTTP/2 or HTTP/3 server" — Google's tile API qualifies, so a
+// much higher number here is exactly its intended case. maximumRequestsPerServer
+// is left at Cesium's own default (6) for every other host, rather than the
+// artificially low 3 that never actually protected anything. Tune with ?reqs=N.
 const reqsParam = parseInt(new URLSearchParams(location.search).get("reqs"), 10);
-Cesium.RequestScheduler.maximumRequestsPerServer =
-  Number.isFinite(reqsParam) && reqsParam > 0 ? reqsParam : 3;
+const GOOGLE_TILE_CONCURRENCY = Number.isFinite(reqsParam) && reqsParam > 0 ? reqsParam : 12;
+Cesium.RequestScheduler.requestsByServer["tile.googleapis.com:443"] = GOOGLE_TILE_CONCURRENCY;
 
 // ---- On-screen error banner ------------------------------------------------
 // Registered before anything else runs so it catches viewer-construction
@@ -1621,9 +1632,15 @@ function tzOffsetHoursFor(lon) {
   if (lon > 44) return 3;      // Gulf (AST)
   return -4;                    // US East coast in July (EDT)
 }
+// Also called once per frame; same reasoning as the camera scratch objects
+// above. J.addSeconds requires a result parameter (Cesium's own signature has
+// no default), so this function always allocated one whether or not the
+// caller cared — now it reuses one across the whole session instead.
+const scratchLocalTime = new Cesium.JulianDate();
+
 function updateLocalClock(realTime, lon) {
   const offsetH = tzOffsetHoursFor(lon);
-  const shifted = J.addSeconds(realTime, offsetH * 3600, new J());
+  const shifted = J.addSeconds(realTime, offsetH * 3600, scratchLocalTime);
   const gDate = J.toGregorianDate(shifted);
   const hh = String(gDate.hour).padStart(2, "0");
   const mm = String(gDate.minute).padStart(2, "0");
@@ -1632,6 +1649,18 @@ function updateLocalClock(realTime, lon) {
 }
 
 // ============================================================= CAMERA ====
+// Reused every frame instead of allocated. updateMainCamera() runs once per
+// frame for the entire recording (~108,000 times over 30 minutes), and both
+// its branches previously built a fresh Cartesian3 and a fresh HeadingPitchRange
+// on every call purely to hand them to camera.lookAt(), which reads them
+// synchronously and does not retain the reference — so there is nothing to
+// alias here, unlike computeState()'s result (see the note in render()).
+// A small, safe cut to steady-state GC pressure, not a fix for the multi-GB
+// growth this session has been chasing; see the memory notes near the tileset
+// options for where that actually lives.
+const scratchCameraTarget = new Cesium.Cartesian3();
+const scratchHPR = new Cesium.HeadingPitchRange();
+
 let idleAngle = 0;
 // Fraction of a stop's screen time spent completing the single revolution.
 // The remainder is held still, facing the way the journey is about to leave.
@@ -1842,7 +1871,7 @@ function applyCameraProfile(leg) {
 function updateMainCamera(state, leg) {
   const margin = leg.type === "flight" ? CAMERA_HEIGHT_MARGIN.flight : CAMERA_HEIGHT_MARGIN.other;
   const targetHeight = state.height + margin;
-  const target = Cesium.Cartesian3.fromDegrees(state.lon, state.lat, targetHeight);
+  const target = Cesium.Cartesian3.fromDegrees(state.lon, state.lat, targetHeight, undefined, scratchCameraTarget);
 
   if (leg.cameraStyle === "orbit" || state.isStatic) {
     lastChaseLegId = null; // next chase leg should snap fresh, not smooth in from a stale heading
@@ -1867,7 +1896,8 @@ function updateMainCamera(state, leg) {
     const sweep = easeInOutCubic(R.clamp(state.frac / ORBIT_SWEEP_FRAC, 0, 1));
     const heading = endHeading - 2 * Math.PI * (1 - sweep);
 
-    mainViewer.camera.lookAt(target, new Cesium.HeadingPitchRange(heading, pitch, range));
+    scratchHPR.heading = heading; scratchHPR.pitch = pitch; scratchHPR.range = range;
+    mainViewer.camera.lookAt(target, scratchHPR);
     lastCameraDebug = {
       style: "orbit",
       headingDeg: ((R.toDegrees(heading) % 360) + 360) % 360,
@@ -1939,7 +1969,8 @@ function updateMainCamera(state, leg) {
   // exactly (pitch -20 yields 98m behind, no better than now).
   const range = isFlight ? 990 : (cameraProfileFor(leg).driveRange ?? 475);
 
-  mainViewer.camera.lookAt(target, new Cesium.HeadingPitchRange(heading, pitch, range));
+  scratchHPR.heading = heading; scratchHPR.pitch = pitch; scratchHPR.range = range;
+  mainViewer.camera.lookAt(target, scratchHPR);
   lastCameraDebug = { style: "chase", headingDeg: ((headingDeg % 360) + 360) % 360, travelHeadingDeg: ((R.toDegrees(state.heading) % 360) + 360) % 360, pitchDeg, targetHeight, range };
 }
 
@@ -2739,17 +2770,70 @@ function preloadPhotoMemories() {
     // before the clock starts. Default 10; ?hold=0 disables it. Applies to
     // Begin the Journey, Replay and ?autostart alike, so every take opens the
     // same way.
+    // ?startleg=<id>  begin the recording already at that leg, instead of at
+    //                 leg 0. ?startsim=<seconds> does the same for an arbitrary
+    //                 point instead of a leg boundary; ?startleg wins if both
+    //                 are given.
+    //
+    // This exists as a way to survive the memory ceiling regardless of what is
+    // actually causing it. Everything else this session has done — the tight
+    // lens, altitude-scaled SSE, request concurrency, the various profiles —
+    // reduces PRESSURE toward the ceiling, but none of it can prove there is
+    // no slow, session-lifetime leak underneath (there is real evidence one
+    // exists: destroying and recreating the tileset 64 times on one earlier
+    // capture did not bring the heap back down, which rules out anything
+    // scoped to the tileset instance itself — see the memory notes near
+    // recyclePhotoTilesetIfNeeded). A leak with that shape cannot be tuned
+    // away from inside the page; the only thing guaranteed to reset it is a
+    // fresh page load, which is a fresh V8 isolate with the full heap ceiling
+    // back at zero.
+    //
+    // So: record the journey in segments instead of one continuous take, each
+    // one its own Chrome launch. Recording the NYC leg on its own —
+    //   ?startleg=drive4&record&hidecontrols&hold=15
+    // — starts a take already there, holds for tiles, then drives, with the
+    // full heap budget available for exactly the leg that has been crashing.
+    // Stitch the segments together in the video editor. leg.simStart is used
+    // rather than an arbitrary point so overlays (chapter card, border stamp,
+    // camera profile, hideGlobe/hidePhotoTiles) fire exactly as they would
+    // arriving there naturally — the leg-transition block in render() keys off
+    // "did the leg id just change", and lastLegId starts null, so the first
+    // frame at any leg is indistinguishable from actually arriving at it.
+    const startLegId = qs.get("startleg");
+    const startSimParam = parseFloat(qs.get("startsim"));
+    let startAtSim = null;
+    if (startLegId) {
+      const leg = LEGS.find((l) => l.id === startLegId);
+      if (leg) {
+        startAtSim = leg.simStart;
+      } else {
+        console.warn(`?startleg="${startLegId}" does not match any leg id. Known ids: ${LEGS.map((l) => l.id).join(", ")}`);
+        showNotice(`?startleg="${startLegId}" not found — starting from the beginning instead.`);
+      }
+    } else if (Number.isFinite(startSimParam) && startSimParam >= 0) {
+      startAtSim = Math.min(startSimParam, TOTAL_SIM);
+    }
+
     const shouldWarmUp = qs.has("warmup");
-    const shouldAutostart = qs.has("autostart");
+    const shouldAutostart = qs.has("autostart") || startAtSim !== null;
 
     if (shouldWarmUp) {
       await warmUpTiles();
     }
     if (shouldAutostart) {
-      // Not startJourney() directly — ?autostart runs the full hands-off
-      // intro: title card over the world view, descent to the opening shot,
-      // tile hold, then drive. Tune with ?intro=N and ?flyto=N.
-      runIntroSequence();
+      if (startAtSim !== null) {
+        // No world-view title card, no descent — those are the opening shot's
+        // introduction and would be wrong for a mid-journey segment. Seek and
+        // go straight to startJourney()'s tile hold, which works from any
+        // simSeconds, not just zero.
+        simSeconds = startAtSim;
+        startJourney();
+      } else {
+        // ?autostart with no seek runs the full hands-off intro: title card
+        // over the world view, descent to the opening shot, tile hold, then
+        // drive. Tune with ?intro=N and ?flyto=N.
+        runIntroSequence();
+      }
     }
   } catch (err) {
     showFatalError(`boot() threw — nothing will render.\n${err.stack || err}`);
