@@ -502,6 +502,17 @@ function legHidesPhotoTiles(leg) {
   return !!leg.hidePhotoTiles || NO_TILES_LEGS.includes("all") || NO_TILES_LEGS.includes(leg.id);
 }
 
+// Symmetric to NO_TILES_LEGS above, for the opposite question: "is this leg's
+// photogrammetry coverage actually complete enough to drop the backdrop?"
+// Test with ?noglobe=<leg-id> before committing hideGlobe:true in
+// itinerary.js — any patch of globe.baseColor (dark navy) showing through
+// means it is not complete and the flag would be a regression, not a saving.
+const NO_GLOBE_LEGS = (new URLSearchParams(location.search).get("noglobe") || "")
+  .split(",").map((x) => x.trim()).filter(Boolean);
+function legHidesGlobe(leg) {
+  return !!leg.hideGlobe || NO_GLOBE_LEGS.includes("all") || NO_GLOBE_LEGS.includes(leg.id);
+}
+
 // ---- Tile quality profiles ------------------------------------------------
 // Every one of these settings was tightened to survive running out of memory,
 // and together they were capping how sharp the photogrammetry could ever get —
@@ -2068,8 +2079,8 @@ function render() {
     // rather than render nothing: keep the globe, since it has coverage
     // everywhere and the tileset by definition does not.
     const suppressTiles = legHidesPhotoTiles(leg);
-    const suppressGlobe = !!leg.hideGlobe && !suppressTiles;
-    if (suppressTiles && leg.hideGlobe) {
+    const suppressGlobe = legHidesGlobe(leg) && !suppressTiles;
+    if (suppressTiles && legHidesGlobe(leg)) {
       console.warn(`Leg "${leg.id}" sets both hidePhotoTiles and hideGlobe; keeping the globe.`);
     }
     mainViewer.scene.globe.show = !(photoTileset && suppressGlobe);
