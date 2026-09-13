@@ -415,9 +415,20 @@ body.presentation #minimapWrap { opacity: 0.9; }
    deliberately NOT included in the .presentation opacity:0 rule above, and
    sits at a higher z-index (100) than everything else in the app, including
    the cinematic letterbox bar (z-index 65), so nothing can cover it.
-   Cesium injects its own credit markup (text spans, and any <img> logo
-   credits it collects) inside this container — the rules below only
-   control ITS position and legibility against the video, not its content. */
+
+   Cesium's own CesiumWidget.css hardcodes the credit content it creates
+   inside a container as:
+     .cesium-widget-credits { position:absolute; bottom:0; left:0; }
+   with no width limit. Normally that's tamed by a second, more specific
+   rule in Viewer.css — `.cesium-viewer .cesium-widget-credits { position:
+   static; ... }` — but that override only fires inside Cesium's OWN
+   generated `.cesium-viewer` wrapper. This app points `creditContainer` at
+   this plain external <div> instead (so the credits land bottom-right, not
+   Cesium's default bottom-left), which sits OUTSIDE that wrapper — so the
+   override never applies, the raw absolute/left:0/unbounded-width rule
+   wins, and the credit text renders escaping this box entirely, off the
+   right edge of the screen. The block below re-applies Viewer.css's own
+   override, scoped to this container instead of `.cesium-viewer`. */
 #googleAttribution {
   position: absolute;
   right: 14px;
@@ -425,15 +436,26 @@ body.presentation #minimapWrap { opacity: 0.9; }
   z-index: 100;
   max-width: 60vw;
   pointer-events: auto;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
+  text-align: right;
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
   line-height: 1.3;
   color: rgba(255,255,255,0.92);
   text-shadow: 0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6);
+}
+/* !important is deliberate: this is overriding a third-party stylesheet
+   (Cesium's widgets.css) that ships its own conflicting absolute
+   positioning for this exact class, not a specificity fight within this
+   app's own CSS. */
+#googleAttribution .cesium-widget-credits {
+  display: inline !important;
+  position: static !important;
+  bottom: auto !important;
+  left: auto !important;
+  padding-right: 0 !important;
+  color: inherit !important;
+  font-size: inherit !important;
+  text-shadow: inherit !important;
 }
 #googleAttribution img { vertical-align: middle; }
 #googleAttribution a { color: inherit; text-decoration: none; }
