@@ -177,16 +177,28 @@ const mainViewer = new Cesium.Viewer("cesiumMain", {
 // this static credit exists only to add the logo Cesium doesn't supply on
 // its own for a direct (non-Ion) API-key integration.
 //
-// IMPORTANT — unverified, read before sending anything back to Google:
-// this build has no network access, so it cannot fetch the actual logo
-// asset from the Map Tiles API Policies page Google's docs point to. The
-// <img> below borrows the "Google" credit asset Cesium ships for its own
-// Ion-brokered Google imagery, as a placeholder that renders correctly —
-// NOT confirmed to be the specific logo file Google's terms require here.
-// Get the real asset from the Policies page and swap the src below before
-// treating this as compliant.
+// IMPORTANT — still unverified, read before sending anything back to
+// Google: this build has no network access, so it cannot fetch the actual
+// logo asset from the Map Tiles API Policies page Google's docs point to.
+//
+// A first version of this pointed the <img> at
+// assets.ion.cesium.com/google-credit.png — an internal Cesium Ion CDN
+// asset, hotlinked from an unrelated domain. Confirmed by screenshot to
+// fail silently: no image, no visible error, just absent, which is worse
+// than showing nothing deliberately, because nothing signals that it
+// failed. Two fixes below: an onerror handler so a failed logo degrades to
+// visible text instead of vanishing, and the file now loads from THIS
+// app's own assets/ folder instead of someone else's CDN.
+//
+// google-logo.png does not exist yet. Download the correct asset from the
+// Map Tiles API Policies page Google's review email linked, save it as
+// assets/google-logo.png, and it will start rendering — no code change
+// needed. Until then this intentionally shows the "Google" text fallback,
+// which is visibly present but is text, not the required logo image.
 mainViewer.creditDisplay.addStaticCredit(new Cesium.Credit(
-  '<img src="https://assets.ion.cesium.com/google-credit.png" alt="Google" style="height:14px;vertical-align:middle;">',
+  '<img src="assets/google-logo.png" alt="Google" ' +
+    'style="height:14px;vertical-align:middle;" ' +
+    'onerror="this.outerHTML=\'<span>Google</span>\';">',
   true
 ));
 
