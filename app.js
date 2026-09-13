@@ -140,6 +140,20 @@ const mainViewer = new Cesium.Viewer("cesiumMain", {
   infoBox: false,
   selectionIndicator: false,
   fullscreenButton: false,
+  // Google Map Tiles API compliance: both the photorealistic 3D tiles and
+  // the Google 2D basemap are loaded directly with a Google Maps Platform
+  // key (not through Cesium Ion), so they are OUR responsibility to
+  // attribute, not Cesium's out-of-the-box behavior for an Ion-brokered
+  // asset. Pointing Cesium's own credit collection at this element — instead
+  // of letting it create its default bottom-left container — means every
+  // credit Cesium gathers (the tileset's own copyright entry, the 2D
+  // imagery provider's credit, Esri/OSM fallback credits) renders bottom-
+  // right automatically, without us having to hand-maintain which source is
+  // active on a given leg. See #googleAttribution in index.html/style.css
+  // for the positioning, and the addStaticCredit() call below for the
+  // explicit Google logo added on top of whatever Cesium collects on its
+  // own.
+  creditContainer: document.getElementById("googleAttribution"),
   // The base imagery layer is added explicitly in setupTerrainAndBuildings()
   // rather than here, so its failure is caught and reported like everything
   // else. It is NOT disabled: it's the surface that shows through wherever
@@ -149,6 +163,33 @@ const mainViewer = new Cesium.Viewer("cesiumMain", {
   // than as lower-detail ground.
   baseLayer: false,
 });
+
+// Google brand logo, as its own STATIC credit — deliberately logo-only now.
+// An earlier version of this also hardcoded a "Map data ©2026 Google" text
+// string alongside it, which was wrong: per Google's Map Tiles API docs,
+// the DATA attribution is not boilerplate you write once — it must be the
+// actual copyright field from each tile response (glTF asset.copyright for
+// the 3D tiles, the viewport-info copyright for 2D tiles), aggregated
+// across every tile currently in view and sorted by frequency of
+// occurrence. That's real per-frame content, not something to fake with a
+// static string. showCreditsOnScreen: true (set on the tileset above) is
+// what makes Cesium surface that REAL data, on screen, automatically —
+// this static credit exists only to add the logo Cesium doesn't supply on
+// its own for a direct (non-Ion) API-key integration.
+//
+// IMPORTANT — unverified, read before sending anything back to Google:
+// this build has no network access, so it cannot fetch the actual logo
+// asset from the Map Tiles API Policies page Google's docs point to. The
+// <img> below borrows the "Google" credit asset Cesium ships for its own
+// Ion-brokered Google imagery, as a placeholder that renders correctly —
+// NOT confirmed to be the specific logo file Google's terms require here.
+// Get the real asset from the Policies page and swap the src below before
+// treating this as compliant.
+mainViewer.creditDisplay.addStaticCredit(new Cesium.Credit(
+  '<img src="https://assets.ion.cesium.com/google-credit.png" alt="Google" style="height:14px;vertical-align:middle;">',
+  true
+));
+
 mainViewer.clock.shouldAnimate = false;
 // The globe is a BACKDROP, not the main surface. It exists only to fill the
 // holes where Google Photorealistic 3D Tiles has no coverage, so it should be
@@ -343,7 +384,9 @@ const BASEMAP_SOURCES = {
     globeStyle: null,
     create: () => new Cesium.UrlTemplateImageryProvider({
       url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-      credit: new Cesium.Credit("Esri, Maxar, Earthstar Geographics"),
+      // showOnScreen explicit — Credit's own default is false (lightbox
+      // only), same gap as the tileset's showCreditsOnScreen above.
+      credit: new Cesium.Credit("Esri, Maxar, Earthstar Geographics", true),
       maximumLevel: IMAGERY_MAX_LEVEL,
     }),
   },
@@ -361,7 +404,7 @@ const BASEMAP_SOURCES = {
     globeStyle: { brightness: 1.2, contrast: 1.0, saturation: 0.55, gamma: 1.1, hue: 0.0 },
     create: () => new Cesium.UrlTemplateImageryProvider({
       url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
-      credit: new Cesium.Credit("Esri, HERE, Garmin, © OpenStreetMap contributors"),
+      credit: new Cesium.Credit("Esri, HERE, Garmin, © OpenStreetMap contributors", true),
       maximumLevel: Math.min(IMAGERY_MAX_LEVEL, 16),
     }),
   },
@@ -719,6 +762,16 @@ function createPhotoTileset(extraOptions = {}) {
       preloadWhenHidden: false,
       foveatedTimeDelay: 0.0,
       loadSiblings: false,
+      // REQUIRED for Google Map Tiles API compliance, per Google's own
+      // integration docs for CesiumJS specifically: "you need to enable
+      // showCreditsOnScreen in your rendering HTML." Defaults to false —
+      // without it, Cesium still collects each tile's real copyright string
+      // (glTF asset.copyright, e.g. "Data SIO, NOAA, U.S. Navy, NGA,
+      // GEBCO;Landsat / Copernicus"), but only surfaces it in the small
+      // click-to-open lightbox, never on screen. That's most likely why the
+      // data-attribution line was never actually visible before this fix,
+      // regardless of where #googleAttribution was positioned.
+      showCreditsOnScreen: true,
       ...extraOptions,
     }
   ));

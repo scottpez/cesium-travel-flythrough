@@ -19,6 +19,20 @@
   <div id="app">
     <div id="cesiumMain"></div>
 
+    <!-- Google Map Tiles API attribution, required whenever the
+         photorealistic 3D tiles or Google 2D satellite imagery are on
+         screen (both are loaded directly with a Google Maps Platform key,
+         bypassing Cesium Ion, so Cesium's Ion-bundled Google credit asset
+         does not apply here — this has to be wired up explicitly). Passed
+         to the Cesium.Viewer as `creditContainer` in app.js, so every
+         credit Cesium collects automatically (the tileset's own copyright
+         string, the 2D imagery provider's credit, Esri/OSM fallback
+         credits) renders here instead of Cesium's default bottom-left
+         location. Never add this element to the `body.presentation`
+         hide-list in style.css — attribution must stay visible in every
+         mode the app can render in, including whatever is being recorded. -->
+    <div id="googleAttribution"></div>
+
     <div id="screenVignette"></div>
     <div id="filmGrain"></div>
     <div id="letterboxTop"></div>
