@@ -164,41 +164,34 @@ const mainViewer = new Cesium.Viewer("cesiumMain", {
   baseLayer: false,
 });
 
-// Google brand logo, as its own STATIC credit — deliberately logo-only now.
-// An earlier version of this also hardcoded a "Map data ©2026 Google" text
-// string alongside it, which was wrong: per Google's Map Tiles API docs,
-// the DATA attribution is not boilerplate you write once — it must be the
-// actual copyright field from each tile response (glTF asset.copyright for
-// the 3D tiles, the viewport-info copyright for 2D tiles), aggregated
-// across every tile currently in view and sorted by frequency of
-// occurrence. That's real per-frame content, not something to fake with a
-// static string. showCreditsOnScreen: true (set on the tileset above) is
-// what makes Cesium surface that REAL data, on screen, automatically —
-// this static credit exists only to add the logo Cesium doesn't supply on
-// its own for a direct (non-Ion) API-key integration.
+// Google brand logo, as its own STATIC credit — deliberately logo-only.
+// An earlier version also hardcoded a "Map data ©2026 Google" text string
+// alongside it, which was wrong: per Google's Map Tiles API docs, the DATA
+// attribution is not boilerplate you write once — it must be the actual
+// copyright field from each tile response (glTF asset.copyright for the 3D
+// tiles, the viewport-info copyright for 2D tiles), aggregated across
+// every tile currently in view and sorted by frequency of occurrence.
+// That's real per-frame content, not something to fake with a static
+// string. showCreditsOnScreen: true (set on the tileset above) is what
+// makes Cesium surface that REAL data on screen automatically — this
+// static credit exists only to add the logo Cesium doesn't supply on its
+// own for a direct (non-Ion) API-key integration.
 //
-// IMPORTANT — still unverified, read before sending anything back to
-// Google: this build has no network access, so it cannot fetch the actual
-// logo asset from the Map Tiles API Policies page Google's docs point to.
+// GoogleMaps_Logo_White_1x.png is the real asset, sourced from the Map
+// Tiles API Policies page Google's review email linked — not a borrowed
+// or placeholder file. White variant, chosen to read against this app's
+// dark theme and the photorealistic ground it usually sits over.
 //
-// A first version of this pointed the <img> at
-// assets.ion.cesium.com/google-credit.png — an internal Cesium Ion CDN
-// asset, hotlinked from an unrelated domain. Confirmed by screenshot to
-// fail silently: no image, no visible error, just absent, which is worse
-// than showing nothing deliberately, because nothing signals that it
-// failed. Two fixes below: an onerror handler so a failed logo degrades to
-// visible text instead of vanishing, and the file now loads from THIS
-// app's own assets/ folder instead of someone else's CDN.
-//
-// google-logo.png does not exist yet. Download the correct asset from the
-// Map Tiles API Policies page Google's review email linked, save it as
-// assets/google-logo.png, and it will start rendering — no code change
-// needed. Until then this intentionally shows the "Google" text fallback,
-// which is visibly present but is text, not the required logo image.
+// An earlier version of this pointed at assets.ion.cesium.com/google-
+// credit.png — an internal Cesium Ion CDN asset, hotlinked from an
+// unrelated domain — which failed silently (no image, no visible error).
+// The onerror fallback below is kept as a safety net for that same class
+// of failure (path typo, file moved), not because this specific asset is
+// still in doubt.
 mainViewer.creditDisplay.addStaticCredit(new Cesium.Credit(
-  '<img src="assets/google-logo.png" alt="Google" ' +
+  '<img src="assets/GoogleMaps_Logo_White_1x.png" alt="Google Maps" ' +
     'style="height:14px;vertical-align:middle;" ' +
-    'onerror="this.outerHTML=\'<span>Google</span>\';">',
+    'onerror="this.outerHTML=\'<span>Google Maps</span>\';">',
   true
 ));
 
