@@ -90,7 +90,7 @@ body.debug #debugPanel { display: block; }
 
 /* ---------------------------------------------------------------- HUD */
 #hud {
-  position: absolute; left: 0; right: 0; bottom: 30px; z-index: 20;
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 20;
   padding: 18px 26px 20px; pointer-events: none;
   background: linear-gradient(to top, rgba(3,5,9,0.82) 0%, rgba(3,5,9,0.45) 55%, transparent 100%);
 }
@@ -442,6 +442,17 @@ body.presentation #minimapWrap { opacity: 0.9; }
   line-height: 1.3;
   color: rgba(255,255,255,0.92);
   text-shadow: 0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6);
+  /* text-shadow only protects text — the Google logo is a white PNG with a
+     transparent background, and a white-on-white patch of desert (or snow,
+     or a bright sky) can make it genuinely invisible with nothing but a
+     shadow to fall back on. A solid scrim behind the whole line guarantees
+     contrast regardless of what the 3D scene behind it looks like at any
+     given moment in a 30-minute unattended recording, which per-element
+     effects can't promise. */
+  background: rgba(4,8,14,0.55);
+  padding: 4px 10px;
+  border-radius: 6px;
+  backdrop-filter: blur(2px);
 }
 /* !important is deliberate: this is overriding a third-party stylesheet
    (Cesium's widgets.css) that ships its own conflicting absolute
@@ -457,7 +468,12 @@ body.presentation #minimapWrap { opacity: 0.9; }
   font-size: inherit !important;
   text-shadow: inherit !important;
 }
-#googleAttribution img { vertical-align: middle; }
+/* drop-shadow is the image equivalent of text-shadow, which does nothing
+   for an <img> — belt-and-suspenders on top of the scrim above. */
+#googleAttribution img {
+  vertical-align: middle;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.9));
+}
 #googleAttribution a { color: inherit; text-decoration: none; }
 /* Clears the black letterbox bar (height 8.5vh when cinematic mode is on)
    instead of being hidden behind it. */
